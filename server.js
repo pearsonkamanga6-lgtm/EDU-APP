@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.2.1';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -200,12 +200,12 @@ function makePracticeSchoolData() {
   const pupils = [];
   classes.forEach((cls, classIndex) => {
     const lower = cls.level.startsWith('Form');
-    for (let i=0;i<60;i++) {
+    for (let i=0;i<5;i++) {
       const sex = i % 2 === 0 ? 'M' : 'F';
       const first = sex === 'M' ? firstMale[(i/2 + classIndex*3) % firstMale.length | 0] : firstFemale[((i-1)/2 + classIndex*3) % firstFemale.length | 0];
       const surname = surnames[(i*7 + classIndex*5) % surnames.length];
-      const track = lower ? (i < 30 ? 'BIOLOGY + HOME ECONOMICS' : 'DESIGN & TECHNOLOGY + PHYSICS') : 'STANDARD NINE';
-      const subjectIds = lower ? [...lowerCommon, ...(i < 30 ? bioTrack : dtTrack)] : [...upperNine];
+      const track = lower ? (i < 3 ? 'BIOLOGY + HOME ECONOMICS' : 'DESIGN & TECHNOLOGY + PHYSICS') : 'STANDARD NINE';
+      const subjectIds = lower ? [...lowerCommon, ...(i < 3 ? bioTrack : dtTrack)] : [...upperNine];
       pupils.push({
         id:`pupil_${cls.name.toLowerCase()}_${String(i+1).padStart(3,'0')}`,
         classId:cls.id,
@@ -252,7 +252,7 @@ function makePracticeSchoolData() {
       const takes = p.subjectIds.includes(a.subjectId);
       if (!takes) { markStates[p.id] = 'NOT_TAKING'; return; }
       if (status === 'SUBMITTED') { marks[p.id] = demoMark(pi, ai); markStates[p.id] = 'PRESENT'; }
-      else if (status === 'DRAFT' && pi < 12) { marks[p.id] = demoMark(pi, ai); markStates[p.id] = 'PRESENT'; }
+      else if (status === 'DRAFT' && pi < 3) { marks[p.id] = demoMark(pi, ai); markStates[p.id] = 'PRESENT'; }
       else markStates[p.id] = 'PENDING';
     });
     resultSheets.push({
@@ -276,11 +276,11 @@ function makePracticeSchoolData() {
     school: {
       id:'school_1', name:'Lumezi Boarding Secondary School', motto:'EDUCATION WITH INTEGRITY AND VIRTUE',
       address:'P.O. Box 1, Lumezi', email:'lumeziboarding@edu.zm', demoMode:true,
-      demoNote:'Practice data only — 16 classes, 960 fictional pupils, 9-subject pupil programmes.'
+      demoNote:'Practice data only — 16 classes, 80 fictional pupils, 9-subject pupil programmes.'
     },
     users, departments, classes, subjects, assessments:[assessment], teachingAssignments, pupils, resultSheets,
     notifications, escalations:[], reportReleaseApprovals:[], reportSendLog:[],
-    auditLog:[{id:id('audit'),at:nowIso(),actorUserId:admin.id,action:'PRACTICE_SCHOOL_CREATED',detail:'Lumezi practice school: 16 classes, 960 fictional pupils'}]
+    auditLog:[{id:id('audit'),at:nowIso(),actorUserId:admin.id,action:'PRACTICE_SCHOOL_CREATED',detail:'Lumezi practice school: 16 classes, 80 fictional pupils'}]
   };
 }
 
