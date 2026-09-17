@@ -1,4 +1,4 @@
-const CACHE = 'edusend-shell-v1-2';
+const CACHE = 'edusend-shell-v1-3';
 const SHELL = [
   '/',
   '/index.html',

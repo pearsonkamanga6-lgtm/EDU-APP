@@ -68,31 +68,45 @@
         <div class="login-card">
           <div class="brand">
             <div class="brand-mark">ES</div>
-            <div><h1>EduSend School Results</h1><p>Role-based results management — V1.1</p></div>
+            <div><h1>EduSend School Results</h1><p>Role-based results management — V1.2</p></div>
           </div>
-          <div class="alert alert-blue small"><b>V1.1 foundation:</b> Administrator → HOD → Subject Teacher → Class Teacher workflow, with result-entry deadlines and live class updates.</div>
+          <div class="alert alert-blue small"><b>V1.2:</b> Administrator → HOD → Subject Teacher → Class Teacher workflow, with result-entry deadlines and live class updates.</div>
           <form id="loginForm">
             <div class="field"><label>Username</label><input id="username" autocomplete="username" value="kamanga" required /></div>
             <div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password" value="teach123" required /></div>
             <button class="btn btn-primary full" type="submit">Sign in</button>
           </form>
           <div class="demo-box">
-            <b class="small">Starter accounts</b>
-            <div class="demo-grid" style="margin-top:8px">
-              <div><b>Administrator</b><br><span class="mono">admin / admin123</span></div>
-              <div><b>Head Teacher</b><br><span class="mono">head / head123</span></div>
-              <div><b>Science HOD</b><br><span class="mono">hod.science / hod123</span></div>
-              <div><b>Mr Kamanga P</b><br><span class="mono">kamanga / teach123</span></div>
-              <div><b>English Teacher</b><br><span class="mono">english.teacher / teach123</span></div>
-              <div><b>Other departments</b><br><span class="mono">hod.social / hod123</span></div>
+            <div class="quick-login-head">
+              <div><b class="small">Quick sign-in — starter accounts</b><div class="tiny muted">Tap an account to sign in immediately.</div></div>
             </div>
-            <p class="tiny muted" style="margin-bottom:0">These are starter/demo credentials. Before public deployment, change passwords and set a strong TOKEN_SECRET.</p>
+            <div class="demo-grid" style="margin-top:10px">
+              <button type="button" class="demo-account" data-username="admin" data-password="admin123"><span class="demo-role">Administrator</span><span class="demo-user">admin</span><span class="demo-go">Sign in →</span></button>
+              <button type="button" class="demo-account" data-username="head" data-password="head123"><span class="demo-role">Head Teacher</span><span class="demo-user">head</span><span class="demo-go">Sign in →</span></button>
+              <button type="button" class="demo-account" data-username="hod.science" data-password="hod123"><span class="demo-role">Science HOD</span><span class="demo-user">hod.science</span><span class="demo-go">Sign in →</span></button>
+              <button type="button" class="demo-account" data-username="hod.languages" data-password="hod123"><span class="demo-role">Languages HOD</span><span class="demo-user">hod.languages</span><span class="demo-go">Sign in →</span></button>
+              <button type="button" class="demo-account" data-username="hod.social" data-password="hod123"><span class="demo-role">Social Sciences HOD</span><span class="demo-user">hod.social</span><span class="demo-go">Sign in →</span></button>
+              <button type="button" class="demo-account" data-username="hod.commercial" data-password="hod123"><span class="demo-role">Commercial Studies HOD</span><span class="demo-user">hod.commercial</span><span class="demo-go">Sign in →</span></button>
+              <button type="button" class="demo-account" data-username="kamanga" data-password="teach123"><span class="demo-role">Mr Kamanga P</span><span class="demo-user">Teacher • Class Teacher</span><span class="demo-go">Sign in →</span></button>
+              <button type="button" class="demo-account" data-username="english.teacher" data-password="teach123"><span class="demo-role">English Teacher</span><span class="demo-user">english.teacher</span><span class="demo-go">Sign in →</span></button>
+            </div>
+            <p class="tiny muted" style="margin-bottom:0">Starter accounts are for setup/testing. We will replace them with real staff accounts and private passwords as we continue building.</p>
           </div>
         </div>
       </div>`;
+    document.querySelectorAll('.demo-account').forEach(card => {
+      card.addEventListener('click', () => {
+        byId('username').value = card.dataset.username || '';
+        byId('password').value = card.dataset.password || '';
+        document.querySelectorAll('.demo-account').forEach(x => x.classList.remove('selected'));
+        card.classList.add('selected');
+        byId('loginForm').requestSubmit();
+      });
+    });
+
     byId('loginForm').addEventListener('submit', async (e) => {
       e.preventDefault();
-      const btn = e.submitter;
+      const btn = e.submitter || byId('loginForm').querySelector('button[type="submit"]');
       btn.disabled = true; btn.textContent = 'Signing in...';
       try {
         const data = await api('/api/login', { method: 'POST', body: { username: byId('username').value, password: byId('password').value } });
@@ -160,7 +174,7 @@
     app.innerHTML = `
       <div class="shell">
         <aside class="sidebar">
-          <div class="side-brand"><div class="brand-mark">ES</div><div><strong>EduSend</strong><div class="tiny">School Results V1.1</div></div></div>
+          <div class="side-brand"><div class="brand-mark">ES</div><div><strong>EduSend</strong><div class="tiny">School Results V1.2</div></div></div>
           <div class="nav">${nav}</div>
           <div class="side-user"><div class="name">${esc(u.name)}</div><div>${chips}</div><button id="logoutBtn" class="btn btn-secondary" style="margin-top:12px;width:100%">Sign out</button></div>
         </aside>
