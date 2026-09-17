@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION = '2.0.0';
+  const APP_VERSION = '2.1.0';
   const app = document.getElementById('app');
   const state = {
     token: localStorage.getItem('edusend_token') || '',
@@ -92,7 +92,7 @@
     app.innerHTML = `
       <div class="login-page">
         <div class="login-card premium-login">
-          <div class="brand"><div class="brand-mark">ES</div><div><h1>EduSend School Results</h1><p>One mark entry. One school workflow. — V2.0</p></div></div>
+          <div class="brand"><div class="brand-mark">ES</div><div><h1>EduSend School Results</h1><p>One mark entry. One school workflow. — V2.1</p></div></div>
           <div class="login-hero"><b>School Results Workflow</b><span>Teachers enter once • Class teachers receive automatically • Parents get reports</span></div>
           <form id="loginForm">
             <div class="field"><label>Username</label><input id="username" autocomplete="username" value="kamanga" required></div>
@@ -104,12 +104,15 @@
             <div class="demo-grid" style="margin-top:10px">
               ${demoAccount('Administrator','admin','admin123')}
               ${demoAccount('Head Teacher','head','head123')}
+              ${demoAccount('Deputy Head Teacher','deputy','deputy123')}
               ${demoAccount('Science HOD','hod.science','hod123')}
               ${demoAccount('Languages HOD','hod.languages','hod123')}
               ${demoAccount('Social Sciences HOD','hod.social','hod123')}
-              ${demoAccount('Commercial Studies HOD','hod.commercial','hod123')}
+              ${demoAccount('Business & Technology HOD','hod.business','hod123')}
+              ${demoAccount('Home Economics HOD','hod.home','hod123')}
               ${demoAccount('Mr Kamanga P','kamanga','teach123','Teacher • Class Teacher')}
-              ${demoAccount('English Teacher','english.teacher','teach123')}
+              ${demoAccount('12L Class Teacher','chanda.commerce','teach123','Ms Esther Chanda')}
+              ${demoAccount('English Teacher','tembo.english','teach123')}
             </div>
           </div>
         </div>
@@ -151,7 +154,7 @@
   }
 
   function navItems() {
-    const items = [{ id:'dashboard', label:'Home', icon:'⌂' }];
+    const items = [{ id:'dashboard', label:'Home', icon:'⌂' }, { id:'practice', label:'Practice Guide', icon:'?' }];
     if (isRole('TEACHER')) items.push({ id:'teacher', label:'Enter Results', icon:'✎' });
     if (isClassTeacher() || isAdminOrHeadFront()) {
       items.push({ id:'classTeacher', label:'Class Progress', icon:'▦' });
@@ -173,13 +176,13 @@
     app.innerHTML = `
       <div class="shell">
         <aside class="sidebar">
-          <div class="side-brand"><div class="brand-mark">ES</div><div><strong>EduSend</strong><div class="tiny">School Results V2.0</div></div></div>
+          <div class="side-brand"><div class="brand-mark">ES</div><div><strong>EduSend</strong><div class="tiny">School Results V2.1</div></div></div>
           <div class="nav">${nav}</div>
           <div class="side-user"><div class="name">${esc(u.name)}</div><div>${roleNames().map(r=>`<span class="role-chip">${esc(r)}</span>`).join('')}</div><button id="logoutBtn" class="btn btn-secondary full" style="margin-top:12px">Sign out</button></div>
         </aside>
         <main class="main">
           <header class="topbar">
-            <div><h2 id="pageTitle">Home</h2><div class="tiny muted">${esc(state.me.school.name)}</div></div>
+            <div><h2 id="pageTitle">Home</h2><div class="tiny muted">${esc(state.me.school.name)} ${state.me.school.demoMode?'<span class="practice-badge">PRACTICE DATA</span>':''}</div></div>
             <div class="topbar-actions"><button id="notifBell" class="icon-btn" aria-label="Notifications">🔔<span id="topUnread" class="counter hidden">0</span></button><div class="topbar-user"><div class="small"><b>${esc(u.name)}</b></div><button id="logoutTopBtn" class="btn btn-secondary btn-signout">Sign out</button></div></div>
           </header>
           <div id="content" class="content"></div>
@@ -193,11 +196,12 @@
   async function navigate(page) {
     state.page = page;
     document.querySelectorAll('[data-nav]').forEach(b => b.classList.toggle('active', b.dataset.nav === page));
-    const titles = { dashboard:'Home', teacher:'Enter Results', classTeacher:'Class Progress', reports:'Report Centre', notifications:'Notifications', hodAssignments:'Department Assignments', hodProgress:'Department Progress', escalations:'Escalations', admin:'School Setup', schoolProgress:'School Progress', audit:'Audit Trail' };
+    const titles = { dashboard:'Home', practice:'Practice Guide', teacher:'Enter Results', classTeacher:'Class Progress', reports:'Report Centre', notifications:'Notifications', hodAssignments:'Department Assignments', hodProgress:'Department Progress', escalations:'Escalations', admin:'School Setup', schoolProgress:'School Progress', audit:'Audit Trail' };
     if (byId('pageTitle')) byId('pageTitle').textContent = titles[page] || 'EduSend';
     const content = byId('content'); content.innerHTML = '<div class="loading-card">Loading…</div>';
     try {
       if (page==='dashboard') await renderDashboard(content);
+      else if (page==='practice') await renderPractice(content);
       else if (page==='teacher') await renderTeacher(content);
       else if (page==='classTeacher') await renderClassTeacher(content);
       else if (page==='reports') await renderReports(content);
@@ -211,6 +215,24 @@
     } catch (err) { content.innerHTML = `<div class="alert alert-red"><b>Could not load this page.</b><br>${esc(err.message)}</div>`; }
   }
 
+  async function renderPractice(content) {
+    const demo = !!state.me?.school?.demoMode;
+    content.innerHTML = `
+      <div class="practice-hero">
+        <div><span class="eyebrow">GUIDED ORIENTATION</span><h2>Learn EduSend by doing the real workflow</h2><p>${demo?'You are using 960 fictional pupils across 16 practice classes. Nothing here is a real learner record.':'Ask the administrator to load the Lumezi practice school from School Setup.'}</p></div>
+        <div class="practice-count">${demo?'960':'—'}<small>practice pupils</small></div>
+      </div>
+      <div class="practice-steps">
+        <article class="practice-step"><span>1</span><div><b>Administrator</b><p>Sign in as <code>admin</code> / <code>admin123</code>. Open School Setup. Review 16 classes, staff, departments, subjects and the practice assessment.</p></div></article>
+        <article class="practice-step"><span>2</span><div><b>Subject teacher</b><p>Sign in as <code>kamanga</code> / <code>teach123</code>. Open Enter Results → 12L Physics. Use <b>Fill demo marks</b>, then <b>Finish & Submit</b>.</p></div></article>
+        <article class="practice-step"><span>3</span><div><b>Class teacher receives automatically</b><p>Sign out and sign in as <code>chanda.commerce</code> / <code>teach123</code>. Ms Esther Chanda is the 12L class teacher. Open Notifications and Class Progress: the Physics marks should already be in the master mark schedule.</p></div></article>
+        <article class="practice-step"><span>4</span><div><b>HOD monitors</b><p>Sign in as <code>hod.science</code> / <code>hod123</code>. Open Dept Progress. You will see submitted, draft and outstanding Mathematics/Natural Sciences result sheets.</p></div></article>
+        <article class="practice-step"><span>5</span><div><b>Escalate a late subject</b><p>As a class teacher, choose an outstanding subject and press Escalate. Then sign in as the HOD or Administrator to follow the escalation path.</p></div></article>
+        <article class="practice-step"><span>6</span><div><b>Generate reports</b><p>When all required subjects are submitted, the class teacher opens Reports. CBC classes use Grades 1–5; Grade 10–12 use the legacy profile. Not Taking never becomes zero.</p></div></article>
+      </div>
+      <div class="card space-top"><h3>Practice school structure</h3><p class="muted">Form 1: 1L, 1M • Form 2: 2L, 2M • Grade 10: 10N, 10M, 10P, 10L • Grade 11: 11M, 11N, 11P, 11L • Grade 12: 12M, 12N, 12P, 12L. Each class has 60 fictional pupils. Form 1–2 pupils take seven common subjects plus either Biology + Home Economics or Design & Technology + Physics, giving nine subjects per pupil.</p></div>`;
+  }
+
   async function renderDashboard(content) {
     const [rem, teacher] = await Promise.all([
       api('/api/reminders'), isRole('TEACHER') ? api('/api/teacher/assignments') : Promise.resolve({ assignments:[] })
@@ -222,7 +244,7 @@
     const classCount = state.me.classTeacherClasses?.length || 0;
     const firstName = (state.me.user.name || '').replace(/^Mr\.?\s+|^Mrs\.?\s+|^Ms\.?\s+/i,'').split(' ')[0] || state.me.user.name;
     content.innerHTML = `
-      <section class="hero-card"><div><span class="eyebrow">EDUSEND V2.0</span><h1>Welcome, ${esc(firstName)}</h1><p>Enter results once. EduSend moves them to the right class teacher automatically.</p></div><div class="hero-orb">ES</div></section>
+      <section class="hero-card"><div><span class="eyebrow">EDUSEND V2.1</span><h1>Welcome, ${esc(firstName)}</h1><p>Enter results once. EduSend moves them to the right class teacher automatically.</p></div><div class="hero-orb">ES</div></section>
       ${deadlineBanner(rem.reminders)}
       <div class="grid grid-4 stats-grid">
         <div class="card stat-card"><div class="stat">${assignments.length}</div><div class="stat-label">Teaching allocations</div></div>
@@ -279,16 +301,30 @@
         <div id="autosaveStatus" class="tiny muted" style="margin-bottom:8px">${readOnly?'Submitted '+fmtDate(d.sheet.submittedAt):'Ready'}</div>
         <div class="table-wrap"><table class="table result-entry"><thead><tr><th>#</th><th>Pupil</th><th class="center">Mark %</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
       </div>
-      <div class="modal-foot"><button class="btn btn-secondary" data-close>Close</button>${readOnly?'':`<button id="saveDraft" class="btn btn-secondary">Save Draft</button><button id="submitResults" class="btn btn-green">Finish & Submit</button>`}</div>`);
+      <div class="modal-foot"><button class="btn btn-secondary" data-close>Close</button>${readOnly?'':`${state.me?.school?.demoMode?'<button id="fillDemoMarks" class="btn btn-gold">Fill demo marks</button>':''}<button id="saveDraft" class="btn btn-secondary">Save Draft</button><button id="submitResults" class="btn btn-green">Finish & Submit</button>`}</div>`);
     if (!readOnly) {
       document.querySelectorAll('[data-mark],[data-state]').forEach(el => el.addEventListener('input', () => scheduleAutosave()));
       document.querySelectorAll('[data-state]').forEach(el => el.addEventListener('change', () => { const mark=document.querySelector(`[data-mark=\"${el.dataset.state}\"]`); if(mark && ['ABSENT','NOT_TAKING','PENDING'].includes(el.value)) mark.value=''; scheduleAutosave(); }));
       document.querySelectorAll('[data-mark]').forEach(el => el.addEventListener('input', () => {
         if (el.value !== '') { const st = document.querySelector(`[data-state="${el.dataset.mark}"]`); if (st) st.value = 'PRESENT'; }
       }));
+      if (byId('fillDemoMarks')) byId('fillDemoMarks').onclick = fillPracticeMarks;
       byId('saveDraft').onclick = () => saveActiveSheet('draft', false);
       byId('submitResults').onclick = () => saveActiveSheet('submit', false);
     }
+  }
+
+  function fillPracticeMarks() {
+    if (!state.activeSheet) return;
+    const subjectSeed = (state.activeSheet.assignment.subjectName || '').length * 3;
+    [...document.querySelectorAll('[data-mark]')].forEach((el, i) => {
+      const st = document.querySelector(`[data-state="${el.dataset.mark}"]`);
+      if (!st || st.value === 'NOT_TAKING') return;
+      el.value = String(48 + ((i * 7 + subjectSeed) % 43));
+      st.value = 'PRESENT';
+    });
+    const s = byId('autosaveStatus'); if (s) s.textContent = 'Practice marks filled — saving draft…';
+    saveActiveSheet('draft', true).then(() => toast('Demo marks filled. Review them, then press Finish & Submit.'));
   }
 
   function collectSheetRows() {
@@ -491,6 +527,7 @@
   async function renderAdmin(content) {
     const d=await api('/api/admin/setup'); const teachers=d.users.filter(u=>(u.roles||[]).includes('TEACHER'));
     content.innerHTML=`<div class="admin-hero"><div><span class="eyebrow">ADMIN CONTROL CENTRE</span><h2>Configure the school once</h2><p>Staff, departments, classes, subjects, pupils, assessments and report deadlines.</p></div><button id="backupBtn" class="btn btn-gold">Download data backup</button></div>
+    <div class="demo-loader-card"><div><span class="eyebrow">ORIENTATION MODE</span><h3>Lumezi practice school</h3><p>Load 16 classes, 960 fictional pupils, realistic staff roles, nine-subject pupil programmes and teaching assignments so you can practise the complete workflow.</p></div><button id="loadDemoBtn" class="btn btn-primary">${d.school.demoMode?'Reset practice school':'Load practice school'}</button></div>
     <div class="admin-grid">
       <div class="card"><h3>Add staff account</h3><form id="addUserForm" class="stack"><input id="newName" placeholder="Full name" required><input id="newUsername" placeholder="Username" required><input id="newPhone" placeholder="Phone (optional)"><input id="newPassword" value="change123" required><select id="newDept"><option value="">No department</option>${d.departments.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select><select id="newRole"><option value="TEACHER">Teacher</option><option value="HOD_TEACHER">HOD + Teacher</option><option value="HEAD">Head Teacher</option></select><button class="btn btn-primary">Create staff account</button></form></div>
       <div class="card"><h3>Create department / subject</h3><form id="deptForm" class="inline-form"><input id="deptName" placeholder="Department name"><button class="btn btn-secondary">Add department</button></form><hr><form id="subjectForm" class="stack"><input id="subjectName" placeholder="Subject name"><select id="subjectDept">${d.departments.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select><button class="btn btn-primary">Add subject</button></form></div>
@@ -506,6 +543,20 @@
   }
 
   function wireAdminForms(content,d){
+    if (byId('loadDemoBtn')) byId('loadDemoBtn').onclick = async () => {
+      const first = confirm('This will replace the current EduSend data with the Lumezi practice school. A server-side backup will be attempted first. Continue?');
+      if (!first) return;
+      const phrase = prompt('Type LOAD LUMEZI PRACTICE to confirm:');
+      if (phrase !== 'LOAD LUMEZI PRACTICE') { toast('Practice school was not loaded.', true); return; }
+      const btn = byId('loadDemoBtn'); btn.disabled = true; btn.textContent = 'Building practice school…';
+      try {
+        const r = await api('/api/admin/load-practice-demo', { method:'POST', body:{confirm:phrase} });
+        if (r.token) { state.token = r.token; localStorage.setItem('edusend_token', r.token); }
+        toast(`${r.summary.classes} classes and ${r.summary.pupils} pupils loaded`);
+        await bootstrap();
+        await navigate('practice');
+      } catch (e) { toast(e.message, true); btn.disabled = false; btn.textContent = 'Load practice school'; }
+    };
     byId('addUserForm').onsubmit=async e=>{e.preventDefault();const r=byId('newRole').value;try{await api('/api/admin/user',{method:'POST',body:{name:byId('newName').value,username:byId('newUsername').value,phone:byId('newPhone').value,password:byId('newPassword').value,departmentId:byId('newDept').value||null,roles:r==='HOD_TEACHER'?['HOD','TEACHER']:[r]}});toast('Staff account created');await renderAdmin(content)}catch(err){toast(err.message,true)}};
     byId('deptForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/department',{method:'POST',body:{name:byId('deptName').value}});toast('Department created');await renderAdmin(content)}catch(err){toast(err.message,true)}};
     byId('subjectForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/subject',{method:'POST',body:{name:byId('subjectName').value,departmentId:byId('subjectDept').value}});toast('Subject created');await renderAdmin(content)}catch(err){toast(err.message,true)}};
