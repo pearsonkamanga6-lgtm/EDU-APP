@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -98,109 +98,193 @@ function loadPupilsSeed() {
   } catch { return []; }
 }
 
-function makeSeedData() {
+function makePracticeSchoolData() {
   const users = [];
-  const addUser = (name, username, password, roles, departmentId = null, phone = '') => {
-    const u = { id: id('usr'), name, username: username.toLowerCase(), passwordHash: hashPassword(password), roles, departmentId, phone, active: true };
+  const addUser = (fixedId, name, username, password, roles, departmentId = null, phone = '') => {
+    const u = { id: fixedId, name, username: username.toLowerCase(), passwordHash: hashPassword(password), roles, departmentId, phone, active: true };
     users.push(u); return u;
   };
 
   const departments = [
     { id: 'dept_languages', name: 'Languages', hodUserId: null },
-    { id: 'dept_science', name: 'Mathematics & Science', hodUserId: null },
+    { id: 'dept_science', name: 'Mathematics & Natural Sciences', hodUserId: null },
     { id: 'dept_social', name: 'Social Sciences', hodUserId: null },
-    { id: 'dept_commercial', name: 'Commercial Studies', hodUserId: null }
+    { id: 'dept_business', name: 'Business & Technology', hodUserId: null },
+    { id: 'dept_home', name: 'Home Economics & Creative Studies', hodUserId: null }
   ];
-  const byDept = Object.fromEntries(departments.map(d => [d.id, d]));
+  const dept = Object.fromEntries(departments.map(d => [d.id, d]));
 
-  const admin = addUser('School Administrator', 'admin', 'admin123', ['ADMIN']);
-  addUser('Head Teacher', 'head', 'head123', ['HEAD']);
-  const hodLanguages = addUser('Languages HOD', 'hod.languages', 'hod123', ['HOD', 'TEACHER'], 'dept_languages');
-  const hodScience = addUser('Science HOD', 'hod.science', 'hod123', ['HOD', 'TEACHER'], 'dept_science');
-  const hodSocial = addUser('Social Sciences HOD', 'hod.social', 'hod123', ['HOD', 'TEACHER'], 'dept_social');
-  const hodCommercial = addUser('Commercial Studies HOD', 'hod.commercial', 'hod123', ['HOD', 'TEACHER'], 'dept_commercial');
-  byDept.dept_languages.hodUserId = hodLanguages.id;
-  byDept.dept_science.hodUserId = hodScience.id;
-  byDept.dept_social.hodUserId = hodSocial.id;
-  byDept.dept_commercial.hodUserId = hodCommercial.id;
+  const admin = addUser('usr_admin_demo', 'School Administrator', 'admin', 'admin123', ['ADMIN']);
+  addUser('usr_head_demo', 'Mr B. Kasaro — Head Teacher', 'head', 'head123', ['HEAD']);
+  addUser('usr_deputy_demo', 'Ms L. Musonda — Deputy Head Teacher', 'deputy', 'deputy123', ['HEAD']);
 
-  const kamanga = addUser('Mr Kamanga P', 'kamanga', 'teach123', ['TEACHER'], 'dept_science', '0973296462');
-  const englishTeacher = addUser('English Teacher', 'english.teacher', 'teach123', ['TEACHER'], 'dept_languages');
-  const scienceTeacher = addUser('Science Teacher', 'science.teacher', 'teach123', ['TEACHER'], 'dept_science');
-  const socialTeacher = addUser('Social Studies Teacher', 'social.teacher', 'teach123', ['TEACHER'], 'dept_social');
-  const commercialTeacher = addUser('Commercial Studies Teacher', 'commercial.teacher', 'teach123', ['TEACHER'], 'dept_commercial');
+  const hodLanguages = addUser('usr_hod_languages', 'Ms R. Nyirenda — HOD Languages', 'hod.languages', 'hod123', ['HOD','TEACHER'], 'dept_languages');
+  const hodScience = addUser('usr_hod_science', 'Mr J. Nkhoma — HOD Mathematics & Natural Sciences', 'hod.science', 'hod123', ['HOD','TEACHER'], 'dept_science');
+  const hodSocial = addUser('usr_hod_social', 'Ms M. Mulenga — HOD Social Sciences', 'hod.social', 'hod123', ['HOD','TEACHER'], 'dept_social');
+  const hodBusiness = addUser('usr_hod_business', 'Mr P. Mwansa — HOD Business & Technology', 'hod.business', 'hod123', ['HOD','TEACHER'], 'dept_business');
+  const hodHome = addUser('usr_hod_home', 'Ms T. Chileshe — HOD Home Economics', 'hod.home', 'hod123', ['HOD','TEACHER'], 'dept_home');
+  dept.dept_languages.hodUserId = hodLanguages.id;
+  dept.dept_science.hodUserId = hodScience.id;
+  dept.dept_social.hodUserId = hodSocial.id;
+  dept.dept_business.hodUserId = hodBusiness.id;
+  dept.dept_home.hodUserId = hodHome.id;
 
-  const classes = [
-    { id: 'class_12l', name: '12L', level: 'Grade 12', gradingSystem: 'LEGACY', classTeacherUserId: kamanga.id, active: true },
-    { id: 'class_1m', name: '1M', level: 'Form 1', gradingSystem: 'CBC', classTeacherUserId: null, active: true }
+  // Subject teachers. The same teacher may teach several classes, just like a real school timetable.
+  const teacherRows = [
+    ['usr_tembo_english','Ms Ruth Tembo','tembo.english','dept_languages'],
+    ['usr_phiri_math','Mr Daniel Phiri','phiri.math','dept_science'],
+    ['usr_kamanga','Mr Kamanga P','kamanga','dept_science'],
+    ['usr_mumba_physics','Mr Felix Mumba','mumba.physics','dept_science'],
+    ['usr_banda_biology','Ms Grace Banda','banda.biology','dept_science'],
+    ['usr_sakala_ict','Ms Memory Sakala','sakala.ict','dept_business'],
+    ['usr_mbewe_civic','Mr Joseph Mbewe','mbewe.civic','dept_social'],
+    ['usr_zulu_geo','Ms Patricia Zulu','zulu.geography','dept_social'],
+    ['usr_lungu_re','Mr Peter Lungu','lungu.re','dept_social'],
+    ['usr_chanda_commerce','Ms Esther Chanda','chanda.commerce','dept_business'],
+    ['usr_mwale_accounts','Mr Kelvin Mwale','mwale.accounts','dept_business'],
+    ['usr_nkhoma_dt','Mr Andrew Nkhoma','nkhoma.dt','dept_business'],
+    ['usr_mulenga_home','Ms Beatrice Mulenga','mulenga.home','dept_home']
   ];
+  const teacherByUsername = {};
+  for (const [uid,name,username,departmentId] of teacherRows) {
+    teacherByUsername[username] = addUser(uid,name,username,'teach123',['TEACHER'],departmentId, username==='kamanga'?'0973296462':'');
+  }
+
+  // 16 practice classes. The repeated "11N" from the spoken example is treated as 11L for the fourth Grade 11 stream.
+  const classDefs = [
+    ['class_1l','1L','Form 1','CBC'], ['class_1m','1M','Form 1','CBC'],
+    ['class_2l','2L','Form 2','CBC'], ['class_2m','2M','Form 2','CBC'],
+    ['class_10n','10N','Grade 10','LEGACY'], ['class_10m','10M','Grade 10','LEGACY'], ['class_10p','10P','Grade 10','LEGACY'], ['class_10l','10L','Grade 10','LEGACY'],
+    ['class_11m','11M','Grade 11','LEGACY'], ['class_11n','11N','Grade 11','LEGACY'], ['class_11p','11P','Grade 11','LEGACY'], ['class_11l','11L','Grade 11','LEGACY'],
+    ['class_12m','12M','Grade 12','LEGACY'], ['class_12n','12N','Grade 12','LEGACY'], ['class_12p','12P','Grade 12','LEGACY'], ['class_12l','12L','Grade 12','LEGACY']
+  ];
+  const classes = classDefs.map(([idv,name,level,gradingSystem]) => ({ id:idv, name, level, gradingSystem, classTeacherUserId:null, active:true }));
+
+  // Exactly nine different teachers act as class teachers across the 16 streams.
+  const classTeacherMap = {
+    '1L':'tembo.english','1M':'banda.biology','2L':'phiri.math','2M':'zulu.geography',
+    '10N':'kamanga','10M':'mbewe.civic','10P':'lungu.re','10L':'chanda.commerce',
+    '11M':'mwale.accounts','11N':'tembo.english','11P':'banda.biology','11L':'phiri.math',
+    '12M':'zulu.geography','12N':'mbewe.civic','12P':'lungu.re','12L':'chanda.commerce'
+  };
+  for (const c of classes) c.classTeacherUserId = teacherByUsername[classTeacherMap[c.name]]?.id || null;
 
   const subjects = [
-    { id: 'sub_english', name: 'English', departmentId: 'dept_languages', active: true },
-    { id: 'sub_mathematics', name: 'Mathematics', departmentId: 'dept_science', active: true },
-    { id: 'sub_physics', name: 'Physics', departmentId: 'dept_science', active: true },
-    { id: 'sub_biology', name: 'Biology', departmentId: 'dept_science', active: true },
-    { id: 'sub_science', name: 'Science', departmentId: 'dept_science', active: true },
-    { id: 'sub_geography', name: 'Geography', departmentId: 'dept_social', active: true },
-    { id: 'sub_civic', name: 'Civic Education', departmentId: 'dept_social', active: true },
-    { id: 'sub_commerce', name: 'Commerce', departmentId: 'dept_commercial', active: true },
-    { id: 'sub_accounts', name: 'Accounts', departmentId: 'dept_commercial', active: true }
+    {id:'sub_english',name:'English',departmentId:'dept_languages',active:true},
+    {id:'sub_mathematics',name:'Mathematics',departmentId:'dept_science',active:true},
+    {id:'sub_ict',name:'ICT',departmentId:'dept_business',active:true},
+    {id:'sub_civic',name:'Civic Education',departmentId:'dept_social',active:true},
+    {id:'sub_geography',name:'Geography',departmentId:'dept_social',active:true},
+    {id:'sub_re',name:'Religious Education',departmentId:'dept_social',active:true},
+    {id:'sub_commerce',name:'Commerce',departmentId:'dept_business',active:true},
+    {id:'sub_biology',name:'Biology',departmentId:'dept_science',active:true},
+    {id:'sub_home',name:'Home Economics',departmentId:'dept_home',active:true},
+    {id:'sub_dt',name:'Design & Technology',departmentId:'dept_business',active:true},
+    {id:'sub_physics',name:'Physics',departmentId:'dept_science',active:true},
+    {id:'sub_accounts',name:'Accounts',departmentId:'dept_business',active:true}
   ];
+  const subjectById = Object.fromEntries(subjects.map(s => [s.id,s]));
 
-  const assessment = {
-    id: 'assess_mock_2026_t2',
-    name: 'Term 2 Mock Examination 2026',
-    term: 'Term 2', year: 2026,
-    dueAt: '2026-09-22T16:00:00+02:00', active: true
-  };
+  // Form 1/2: 7 common subjects + one of two 2-subject pathways = 9 subjects per pupil.
+  const lowerCommon = ['sub_english','sub_mathematics','sub_ict','sub_civic','sub_geography','sub_re','sub_commerce'];
+  const bioTrack = ['sub_biology','sub_home'];
+  const dtTrack = ['sub_dt','sub_physics'];
+  // Grade 10–12: nine practice subjects per pupil.
+  const upperNine = ['sub_english','sub_mathematics','sub_physics','sub_biology','sub_geography','sub_civic','sub_commerce','sub_accounts','sub_ict'];
 
-  const teachingAssignments = [
-    { id: 'ta_12l_eng', classId: 'class_12l', subjectId: 'sub_english', teacherUserId: englishTeacher.id, active: true },
-    { id: 'ta_12l_mat', classId: 'class_12l', subjectId: 'sub_mathematics', teacherUserId: kamanga.id, active: true },
-    { id: 'ta_12l_bio', classId: 'class_12l', subjectId: 'sub_biology', teacherUserId: scienceTeacher.id, active: true },
-    { id: 'ta_12l_sci', classId: 'class_12l', subjectId: 'sub_science', teacherUserId: scienceTeacher.id, active: true },
-    { id: 'ta_12l_geo', classId: 'class_12l', subjectId: 'sub_geography', teacherUserId: socialTeacher.id, active: true },
-    { id: 'ta_12l_civ', classId: 'class_12l', subjectId: 'sub_civic', teacherUserId: socialTeacher.id, active: true },
-    { id: 'ta_12l_com', classId: 'class_12l', subjectId: 'sub_commerce', teacherUserId: commercialTeacher.id, active: true },
-    { id: 'ta_12l_acc', classId: 'class_12l', subjectId: 'sub_accounts', teacherUserId: commercialTeacher.id, active: true }
-  ];
+  const firstMale = ['Aaron','Abel','Andrew','Brian','Chanda','Chisala','Dalitso','David','Emmanuel','Felix','Gift','Isaac','Jackson','Kelvin','Moses','Mumba','Mwansa','Mwewa','Nathan','Patrick','Paul','Peter','Richard','Samuel','Simon','Thabo','Victor','William','Wisdom','Yoram'];
+  const firstFemale = ['Agness','Alice','Beatrice','Brenda','Bwalya','Chipo','Chisomo','Edina','Esther','Faith','Grace','Hope','Joyce','Loveness','Mary','Mercy','Memory','Natasha','Patricia','Precious','Racheal','Rejoice','Ruth','Sibongile','Thandiwe','Theresa','Violet','Wendy','Yvonne','Zodwa'];
+  const surnames = ['Banda','Bwalya','Chanda','Chileshe','Chirwa','Daka','Hamaimbo','Kalaba','Kunda','Lungu','Mbewe','Miti','Mkandawire','Moyo','Mpundu','Mulenga','Mumba','Mundia','Mwanza','Mwale','Nasilele','Ngoma','Ngulube','Njobvu','Nkandu','Nkhoma','Phiri','Sakala','Tembo','Zimba','Zulu','Chisanga','Kabwe','Musonda','Siame','Zulu','Soko','Mwanza','Nyirenda','Chola'];
 
-  const pupils = loadPupilsSeed();
-  const resultSheets = [];
-  for (const assignment of teachingAssignments) {
-    const subject = subjects.find(s => s.id === assignment.subjectId);
-    const marks = {}; const markStates = {};
-    for (const pupil of pupils) {
-      const score = pupil.importedScores?.[subject?.name];
-      if (score !== undefined && score !== null && score !== '') {
-        marks[pupil.id] = Number(score);
-        markStates[pupil.id] = 'PRESENT';
-      } else {
-        markStates[pupil.id] = 'PENDING';
-      }
+  const pupils = [];
+  classes.forEach((cls, classIndex) => {
+    const lower = cls.level.startsWith('Form');
+    for (let i=0;i<60;i++) {
+      const sex = i % 2 === 0 ? 'M' : 'F';
+      const first = sex === 'M' ? firstMale[(i/2 + classIndex*3) % firstMale.length | 0] : firstFemale[((i-1)/2 + classIndex*3) % firstFemale.length | 0];
+      const surname = surnames[(i*7 + classIndex*5) % surnames.length];
+      const track = lower ? (i < 30 ? 'BIOLOGY + HOME ECONOMICS' : 'DESIGN & TECHNOLOGY + PHYSICS') : 'STANDARD NINE';
+      const subjectIds = lower ? [...lowerCommon, ...(i < 30 ? bioTrack : dtTrack)] : [...upperNine];
+      pupils.push({
+        id:`pupil_${cls.name.toLowerCase()}_${String(i+1).padStart(3,'0')}`,
+        classId:cls.id,
+        name:`${first} ${surname}`.toUpperCase(), sex,
+        examNo:`${cls.name}-${String(i+1).padStart(3,'0')}`,
+        parentPrimary:'', parentAltPhones:[],
+        isRepeater: i > 0 && (i+1) % 20 === 0,
+        subjectTrack:track, subjectIds, active:true
+      });
     }
-    resultSheets.push({
-      id: `sheet_${assignment.id}_${assessment.id}`,
-      assignmentId: assignment.id, assessmentId: assessment.id,
-      status: 'SUBMITTED', marks, markStates,
-      updatedAt: '2026-09-17T14:00:00+02:00', submittedAt: '2026-09-17T14:00:00+02:00',
-      enteredByUserId: assignment.teacherUserId, source: 'Imported from existing EduSend 12L mock data'
-    });
+  });
+
+  const teacherForSubject = {
+    sub_english:'tembo.english', sub_mathematics:'phiri.math', sub_ict:'sakala.ict', sub_civic:'mbewe.civic',
+    sub_geography:'zulu.geography', sub_re:'lungu.re', sub_commerce:'chanda.commerce', sub_biology:'banda.biology',
+    sub_home:'mulenga.home', sub_dt:'nkhoma.dt', sub_physics:'mumba.physics', sub_accounts:'mwale.accounts'
+  };
+  const kamangaPhysicsClasses = new Set(['1L','10P','12L','12M']);
+  const teachingAssignments = [];
+  for (const cls of classes) {
+    const classSubjectIds = cls.level.startsWith('Form') ? [...lowerCommon, ...bioTrack, ...dtTrack] : [...upperNine];
+    for (const subjectId of classSubjectIds) {
+      let username = teacherForSubject[subjectId];
+      if (subjectId === 'sub_physics' && kamangaPhysicsClasses.has(cls.name)) username = 'kamanga';
+      const teacher = teacherByUsername[username];
+      teachingAssignments.push({ id:`ta_${cls.name.toLowerCase()}_${subjectId.replace('sub_','')}`, classId:cls.id, subjectId, teacherUserId:teacher.id, active:true });
+    }
   }
-  pupils.forEach(p => delete p.importedScores);
+
+  const assessment = { id:'assess_practice_t3_2026', name:'Term 3 Practice Assessment 2026', term:'Term 3', year:2026, dueAt:'2026-09-25T16:00:00+02:00', active:true };
+  const resultSheets = [];
+  const notifications = [];
+  const demoSubmitted = new Set(['12L|sub_english','12L|sub_mathematics','1L|sub_english','1L|sub_mathematics']);
+  const demoDraft = new Set(['1L|sub_biology']);
+
+  const demoMark = (pupilIndex, subjectIndex) => 42 + ((pupilIndex*7 + subjectIndex*11) % 49); // 42–90
+  teachingAssignments.forEach((a, ai) => {
+    const cls = classes.find(c => c.id === a.classId);
+    const classPupils = pupils.filter(p => p.classId === cls.id);
+    const key = `${cls.name}|${a.subjectId}`;
+    const status = demoSubmitted.has(key) ? 'SUBMITTED' : demoDraft.has(key) ? 'DRAFT' : 'NOT_STARTED';
+    const marks = {}; const markStates = {};
+    classPupils.forEach((p, pi) => {
+      const takes = p.subjectIds.includes(a.subjectId);
+      if (!takes) { markStates[p.id] = 'NOT_TAKING'; return; }
+      if (status === 'SUBMITTED') { marks[p.id] = demoMark(pi, ai); markStates[p.id] = 'PRESENT'; }
+      else if (status === 'DRAFT' && pi < 12) { marks[p.id] = demoMark(pi, ai); markStates[p.id] = 'PRESENT'; }
+      else markStates[p.id] = 'PENDING';
+    });
+    resultSheets.push({
+      id:`sheet_${a.id}_${assessment.id}`, assignmentId:a.id, assessmentId:assessment.id,
+      status, marks, markStates, deadlineOverride:null,
+      updatedAt:status==='NOT_STARTED'?null:'2026-09-17T19:30:00+02:00', submittedAt:status==='SUBMITTED'?'2026-09-17T19:30:00+02:00':null,
+      enteredByUserId:a.teacherUserId, source:'EduSend Lumezi practice data'
+    });
+    if (status === 'SUBMITTED') {
+      const ct = cls.classTeacherUserId;
+      if (ct) notifications.push({
+        id:`note_seed_${a.id}`, userId:ct, type:'RESULT_SUBMITTED', title:`${subjectById[a.subjectId].name} results received`,
+        message:`${users.find(u=>u.id===a.teacherUserId)?.name || 'Teacher'} submitted ${subjectById[a.subjectId].name} results for ${cls.name}.`,
+        meta:{classId:cls.id,assignmentId:a.id,assessmentId:assessment.id}, createdAt:'2026-09-17T19:31:00+02:00', readAt:null
+      });
+    }
+  });
 
   return {
     version: 2,
     school: {
-      id: 'school_1', name: 'Lumezi Boarding Secondary School',
-      motto: 'EDUCATION WITH INTEGRITY AND VIRTUE', address: 'P.O. Box 1, Lumezi',
-      email: 'lumeziboarding@edu.zm'
+      id:'school_1', name:'Lumezi Boarding Secondary School', motto:'EDUCATION WITH INTEGRITY AND VIRTUE',
+      address:'P.O. Box 1, Lumezi', email:'lumeziboarding@edu.zm', demoMode:true,
+      demoNote:'Practice data only — 16 classes, 960 fictional pupils, 9-subject pupil programmes.'
     },
-    users, departments, classes, subjects, assessments: [assessment],
-    teachingAssignments, pupils, resultSheets,
-    notifications: [], escalations: [], reportReleaseApprovals: [], reportSendLog: [],
-    auditLog: [{ id: id('audit'), at: nowIso(), actorUserId: admin.id, action: 'SEED_CREATED', detail: 'Initial EduSend V2 data created' }]
+    users, departments, classes, subjects, assessments:[assessment], teachingAssignments, pupils, resultSheets,
+    notifications, escalations:[], reportReleaseApprovals:[], reportSendLog:[],
+    auditLog:[{id:id('audit'),at:nowIso(),actorUserId:admin.id,action:'PRACTICE_SCHOOL_CREATED',detail:'Lumezi practice school: 16 classes, 960 fictional pupils'}]
   };
+}
+
+function makeSeedData() {
+  return makePracticeSchoolData();
 }
 
 function migrateData(raw) {
@@ -215,7 +299,7 @@ function migrateData(raw) {
   db.notifications ||= []; db.escalations ||= []; db.reportReleaseApprovals ||= []; db.reportSendLog ||= []; db.auditLog ||= [];
   db.users.forEach(u => { if (u.phone === undefined) u.phone = ''; if (u.active === undefined) u.active = true; });
   db.classes.forEach(c => { c.gradingSystem = c.gradingSystem === 'CBC' ? 'CBC' : 'LEGACY'; if (c.active === undefined) c.active = true; });
-  db.pupils.forEach(p => { if (p.isRepeater === undefined) p.isRepeater = false; p.parentAltPhones ||= []; if (p.active === undefined) p.active = true; });
+  db.pupils.forEach(p => { if (p.isRepeater === undefined) p.isRepeater = false; p.parentAltPhones ||= []; p.subjectIds ||= []; p.subjectTrack ||= ''; if (p.active === undefined) p.active = true; });
   db.resultSheets.forEach(s => {
     s.marks ||= {}; s.markStates ||= {};
     for (const pupilId of Object.keys(s.marks)) if (!s.markStates[pupilId]) s.markStates[pupilId] = 'PRESENT';
@@ -770,6 +854,25 @@ async function api(req, res, urlObj) {
     });
     const classes = db.classes.filter(c => c.active !== false).map(c => ({ class: c, readiness: reportReadiness(c.id, assessment.id) }));
     return sendJson(res, 200, { assessment, rows, classes });
+  }
+
+  if (req.method === 'POST' && pathname === '/api/admin/load-practice-demo') {
+    if (!hasRole(user, 'ADMIN')) return sendError(res, 403, 'Administrator access required');
+    const body = await readJson(req);
+    if (String(body.confirm || '') !== 'LOAD LUMEZI PRACTICE') return sendError(res, 400, 'Confirmation phrase does not match');
+    try {
+      const backupName = `backup-before-practice-${Date.now()}.json`;
+      fs.writeFileSync(path.join(DATA_DIR, backupName), JSON.stringify(db, null, 2));
+    } catch (e) { console.warn('Could not create pre-demo backup:', e.message); }
+    db = makePracticeSchoolData();
+    const newAdmin = db.users.find(u => u.username === 'admin');
+    audit(newAdmin.id, 'PRACTICE_DATA_LOADED', 'Lumezi practice school loaded by administrator');
+    saveData();
+    broadcastEvent({ type:'PRACTICE_DATA_LOADED', at:nowIso() });
+    return sendJson(res, 200, {
+      ok:true, token:issueToken(newAdmin.id),
+      summary:{ classes:db.classes.length, pupils:db.pupils.length, staff:db.users.length, assignments:db.teachingAssignments.length, assessment:db.assessments[0]?.name }
+    });
   }
 
   if (req.method === 'GET' && pathname === '/api/admin/setup') {

@@ -1,8 +1,8 @@
 {
   "name": "edusend-school-results",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
-  "description": "EduSend V2 school results workflow system",
+  "description": "EduSend V2.1 school results workflow with Lumezi practice school data",
   "scripts": {
     "start": "node server.js"
   },
