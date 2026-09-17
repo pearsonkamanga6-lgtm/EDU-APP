@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION = '2.1.0';
+  const APP_VERSION = '2.2.1';
   const app = document.getElementById('app');
   const state = {
     token: localStorage.getItem('edusend_token') || '',
@@ -21,6 +21,67 @@
   const roles = () => state.me?.user?.roles || [];
   const isRole = r => roles().includes(r);
   const isClassTeacher = () => !!state.me?.classTeacherClasses?.length;
+  const DRAFT_PREFIX = 'edusend_local_draft_v2_2:';
+
+  function localDraftKey(assignmentId, assessmentId) {
+    const userId = state.me?.user?.id || 'unknown';
+    return `${DRAFT_PREFIX}${userId}:${assignmentId}:${assessmentId}`;
+  }
+
+  function storeLocalDraft(rows, meta = {}) {
+    if (!state.activeSheet) return;
+    try {
+      const payload = {
+        assignmentId: state.activeSheet.assignment.id,
+        assessmentId: state.activeSheet.assessment.id,
+        rows,
+        savedAt: meta.serverSavedAt || new Date().toISOString(),
+        serverSavedAt: meta.serverSavedAt || null,
+        submittedCopy: !!meta.submittedCopy
+      };
+      localStorage.setItem(localDraftKey(payload.assignmentId, payload.assessmentId), JSON.stringify(payload));
+    } catch {}
+  }
+
+  function readLocalDraft(assignmentId, assessmentId) {
+    try {
+      const raw = localStorage.getItem(localDraftKey(assignmentId, assessmentId));
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  }
+
+  function removeLocalDraft(assignmentId, assessmentId) {
+    try { localStorage.removeItem(localDraftKey(assignmentId, assessmentId)); } catch {}
+  }
+
+  function snapshotActiveDraft() {
+    if (!state.activeSheet || ['SUBMITTED','LOCKED'].includes(state.activeSheet.sheet?.status)) return null;
+    const markEls = [...document.querySelectorAll('[data-mark]')];
+    if (!markEls.length) return null;
+    const rows = collectSheetRows();
+    storeLocalDraft(rows);
+    return rows;
+  }
+
+  function syncActiveDraftOnHide() {
+    const rows = snapshotActiveDraft();
+    if (!rows || !state.token || !state.activeSheet) return;
+    const body = JSON.stringify({
+      assignmentId: state.activeSheet.assignment.id,
+      assessmentId: state.activeSheet.assessment.id,
+      rows,
+      action: 'draft'
+    });
+    try {
+      fetch('/api/teacher/sheet', {
+        method: 'PUT',
+        headers: { 'Content-Type':'application/json', Authorization:`Bearer ${state.token}` },
+        body,
+        keepalive: true,
+        cache: 'no-store'
+      }).catch(() => {});
+    } catch {}
+  }
 
   function toast(message, bad = false) {
     let el = document.querySelector('.toast');
@@ -29,6 +90,17 @@
     }
     el.classList.toggle('bad', bad); el.textContent = message; el.style.display = 'block';
     clearTimeout(el._t); el._t = setTimeout(() => el.style.display = 'none', 3600);
+  }
+
+  function actionPopup(title, message, kind = 'success') {
+    byId('actionPopup')?.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'actionPopup';
+    wrap.className = 'action-popup-backdrop';
+    wrap.innerHTML = `<div class="action-popup ${kind==='error'?'error':''}"><div class="action-popup-icon">${kind==='error'?'!':'✓'}</div><h3>${esc(title)}</h3><p>${esc(message)}</p><button class="btn ${kind==='error'?'btn-secondary':'btn-primary'} full" data-popup-close>OK</button></div>`;
+    document.body.appendChild(wrap);
+    wrap.querySelector('[data-popup-close]').onclick = () => wrap.remove();
+    wrap.addEventListener('click', e => { if (e.target === wrap) wrap.remove(); });
   }
 
   async function api(path, opts = {}) {
@@ -92,7 +164,7 @@
     app.innerHTML = `
       <div class="login-page">
         <div class="login-card premium-login">
-          <div class="brand"><div class="brand-mark">ES</div><div><h1>EduSend School Results</h1><p>One mark entry. One school workflow. — V2.1</p></div></div>
+          <div class="brand"><div class="brand-mark">ES</div><div><h1>EduSend School Results</h1><p>One mark entry. One school workflow. — V2.2.1</p></div></div>
           <div class="login-hero"><b>School Results Workflow</b><span>Teachers enter once • Class teachers receive automatically • Parents get reports</span></div>
           <form id="loginForm">
             <div class="field"><label>Username</label><input id="username" autocomplete="username" value="kamanga" required></div>
@@ -176,7 +248,7 @@
     app.innerHTML = `
       <div class="shell">
         <aside class="sidebar">
-          <div class="side-brand"><div class="brand-mark">ES</div><div><strong>EduSend</strong><div class="tiny">School Results V2.1</div></div></div>
+          <div class="side-brand"><div class="brand-mark">ES</div><div><strong>EduSend</strong><div class="tiny">School Results V2.2.1</div></div></div>
           <div class="nav">${nav}</div>
           <div class="side-user"><div class="name">${esc(u.name)}</div><div>${roleNames().map(r=>`<span class="role-chip">${esc(r)}</span>`).join('')}</div><button id="logoutBtn" class="btn btn-secondary full" style="margin-top:12px">Sign out</button></div>
         </aside>
@@ -219,8 +291,8 @@
     const demo = !!state.me?.school?.demoMode;
     content.innerHTML = `
       <div class="practice-hero">
-        <div><span class="eyebrow">GUIDED ORIENTATION</span><h2>Learn EduSend by doing the real workflow</h2><p>${demo?'You are using 960 fictional pupils across 16 practice classes. Nothing here is a real learner record.':'Ask the administrator to load the Lumezi practice school from School Setup.'}</p></div>
-        <div class="practice-count">${demo?'960':'—'}<small>practice pupils</small></div>
+        <div><span class="eyebrow">GUIDED ORIENTATION</span><h2>Learn EduSend by doing the real workflow</h2><p>${demo?'You are using 80 fictional pupils across 16 practice classes. Nothing here is a real learner record.':'Ask the administrator to load the Lumezi practice school from School Setup.'}</p></div>
+        <div class="practice-count">${demo?'80':'—'}<small>practice pupils</small></div>
       </div>
       <div class="practice-steps">
         <article class="practice-step"><span>1</span><div><b>Administrator</b><p>Sign in as <code>admin</code> / <code>admin123</code>. Open School Setup. Review 16 classes, staff, departments, subjects and the practice assessment.</p></div></article>
@@ -230,7 +302,7 @@
         <article class="practice-step"><span>5</span><div><b>Escalate a late subject</b><p>As a class teacher, choose an outstanding subject and press Escalate. Then sign in as the HOD or Administrator to follow the escalation path.</p></div></article>
         <article class="practice-step"><span>6</span><div><b>Generate reports</b><p>When all required subjects are submitted, the class teacher opens Reports. CBC classes use Grades 1–5; Grade 10–12 use the legacy profile. Not Taking never becomes zero.</p></div></article>
       </div>
-      <div class="card space-top"><h3>Practice school structure</h3><p class="muted">Form 1: 1L, 1M • Form 2: 2L, 2M • Grade 10: 10N, 10M, 10P, 10L • Grade 11: 11M, 11N, 11P, 11L • Grade 12: 12M, 12N, 12P, 12L. Each class has 60 fictional pupils. Form 1–2 pupils take seven common subjects plus either Biology + Home Economics or Design & Technology + Physics, giving nine subjects per pupil.</p></div>`;
+      <div class="card space-top"><h3>Practice school structure</h3><p class="muted">Form 1: 1L, 1M • Form 2: 2L, 2M • Grade 10: 10N, 10M, 10P, 10L • Grade 11: 11M, 11N, 11P, 11L • Grade 12: 12M, 12N, 12P, 12L. Each class has 5 fictional pupils. Form 1–2 pupils take seven common subjects plus either Biology + Home Economics or Design & Technology + Physics, giving nine subjects per pupil.</p></div>`;
   }
 
   async function renderDashboard(content) {
@@ -244,7 +316,7 @@
     const classCount = state.me.classTeacherClasses?.length || 0;
     const firstName = (state.me.user.name || '').replace(/^Mr\.?\s+|^Mrs\.?\s+|^Ms\.?\s+/i,'').split(' ')[0] || state.me.user.name;
     content.innerHTML = `
-      <section class="hero-card"><div><span class="eyebrow">EDUSEND V2.1</span><h1>Welcome, ${esc(firstName)}</h1><p>Enter results once. EduSend moves them to the right class teacher automatically.</p></div><div class="hero-orb">ES</div></section>
+      <section class="hero-card"><div><span class="eyebrow">EDUSEND V2.2.1</span><h1>Welcome, ${esc(firstName)}</h1><p>Enter results once. EduSend moves them to the right class teacher automatically.</p></div><div class="hero-orb">ES</div></section>
       ${deadlineBanner(rem.reminders)}
       <div class="grid grid-4 stats-grid">
         <div class="card stat-card"><div class="stat">${assignments.length}</div><div class="stat-label">Teaching allocations</div></div>
@@ -286,8 +358,26 @@
 
   async function openResultSheet(assignmentId, assessmentId) {
     const d = await api(`/api/teacher/sheet?assignmentId=${encodeURIComponent(assignmentId)}&assessmentId=${encodeURIComponent(assessmentId)}`);
-    state.activeSheet = d;
     const readOnly = ['SUBMITTED','LOCKED'].includes(d.sheet.status);
+    let recovered = false;
+    let recoveredAt = '';
+    if (!readOnly) {
+      const local = readLocalDraft(assignmentId, assessmentId);
+      const localTime = Date.parse(local?.savedAt || '');
+      const serverTime = Date.parse(d.sheet.updatedAt || '') || 0;
+      if (local?.rows?.length && Number.isFinite(localTime) && localTime > serverTime) {
+        const lm = {}; const ls = {};
+        for (const row of local.rows) {
+          if (row.mark !== null && row.mark !== '' && row.mark !== undefined) lm[row.pupilId] = Number(row.mark);
+          ls[row.pupilId] = row.state || (row.mark !== null && row.mark !== '' ? 'PRESENT' : 'PENDING');
+        }
+        d.sheet.marks = lm;
+        d.sheet.markStates = ls;
+        recovered = true;
+        recoveredAt = local.savedAt;
+      }
+    }
+    state.activeSheet = d;
     const rows = d.pupils.map((p,i) => {
       const mark = d.sheet.marks[p.id] ?? '';
       const st = d.sheet.markStates[p.id] || (mark!==''?'PRESENT':'PENDING');
@@ -297,20 +387,28 @@
       <div class="modal-head"><div><b>${esc(d.assignment.className)} — ${esc(d.assignment.subjectName)}</b><div class="tiny muted">${esc(d.assessment.name)} • ${esc(d.sheet.deadline.text)} • ${fmtDate(d.sheet.deadline.dueAt)}</div></div><button class="close" data-close>×</button></div>
       <div class="modal-body">
         <div class="workflow-strip"><span>1. Enter mark</span><span>2. Mark absent/not taking where needed</span><span>3. Finish & Submit</span></div>
-        ${readOnly?'<div class="alert alert-green"><b>This sheet is already submitted.</b> Marks are read-only unless a correction is requested.</div>':'<div class="alert alert-blue"><b>Autosave is on.</b> Pending pupils must be resolved before Finish & Submit.</div>'}
-        <div id="autosaveStatus" class="tiny muted" style="margin-bottom:8px">${readOnly?'Submitted '+fmtDate(d.sheet.submittedAt):'Ready'}</div>
+        ${readOnly?'<div class="alert alert-green"><b>This sheet is already submitted.</b> Marks are read-only unless a correction is requested.</div>':'<div class="alert alert-blue"><b>Double-save protection is on.</b> Changes are kept on this device immediately and also saved to the school server.</div>'}
+        ${recovered?`<div class="alert alert-orange"><b>Recovered draft.</b> EduSend restored newer unsent work saved on this device at ${fmtDate(recoveredAt)}.</div>`:''}
+        <div id="autosaveStatus" class="save-state ${readOnly?'saved':''}">${readOnly?'Submitted '+fmtDate(d.sheet.submittedAt):recovered?'Recovered locally — syncing to school server…':d.sheet.updatedAt?'Last server save '+fmtDate(d.sheet.updatedAt):'Ready — not yet saved'}</div>
         <div class="table-wrap"><table class="table result-entry"><thead><tr><th>#</th><th>Pupil</th><th class="center">Mark %</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
       </div>
       <div class="modal-foot"><button class="btn btn-secondary" data-close>Close</button>${readOnly?'':`${state.me?.school?.demoMode?'<button id="fillDemoMarks" class="btn btn-gold">Fill demo marks</button>':''}<button id="saveDraft" class="btn btn-secondary">Save Draft</button><button id="submitResults" class="btn btn-green">Finish & Submit</button>`}</div>`);
     if (!readOnly) {
-      document.querySelectorAll('[data-mark],[data-state]').forEach(el => el.addEventListener('input', () => scheduleAutosave()));
-      document.querySelectorAll('[data-state]').forEach(el => el.addEventListener('change', () => { const mark=document.querySelector(`[data-mark=\"${el.dataset.state}\"]`); if(mark && ['ABSENT','NOT_TAKING','PENDING'].includes(el.value)) mark.value=''; scheduleAutosave(); }));
+      const localThenAutosave = () => { snapshotActiveDraft(); scheduleAutosave(); };
+      document.querySelectorAll('[data-mark],[data-state]').forEach(el => el.addEventListener('input', localThenAutosave));
+      document.querySelectorAll('[data-state]').forEach(el => el.addEventListener('change', () => {
+        const mark=document.querySelector(`[data-mark="${el.dataset.state}"]`);
+        if(mark && ['ABSENT','NOT_TAKING','PENDING'].includes(el.value)) mark.value='';
+        snapshotActiveDraft(); scheduleAutosave();
+      }));
       document.querySelectorAll('[data-mark]').forEach(el => el.addEventListener('input', () => {
         if (el.value !== '') { const st = document.querySelector(`[data-state="${el.dataset.mark}"]`); if (st) st.value = 'PRESENT'; }
+        snapshotActiveDraft();
       }));
       if (byId('fillDemoMarks')) byId('fillDemoMarks').onclick = fillPracticeMarks;
       byId('saveDraft').onclick = () => saveActiveSheet('draft', false);
       byId('submitResults').onclick = () => saveActiveSheet('submit', false);
+      if (recovered) setTimeout(() => saveActiveSheet('draft', true), 150);
     }
   }
 
@@ -332,19 +430,52 @@
   }
 
   function scheduleAutosave() {
-    clearTimeout(state.autosaveTimer); const s = byId('autosaveStatus'); if (s) s.textContent = 'Unsaved changes…';
-    state.autosaveTimer = setTimeout(() => saveActiveSheet('draft', true), 1200);
+    clearTimeout(state.autosaveTimer);
+    const s = byId('autosaveStatus');
+    if (s) { s.textContent = 'Saved on this device • syncing to school server…'; s.className = 'save-state syncing'; }
+    state.autosaveTimer = setTimeout(() => saveActiveSheet('draft', true), 850);
   }
 
   async function saveActiveSheet(action, silent) {
     if (!state.activeSheet) return;
     clearTimeout(state.autosaveTimer);
+    const current = state.activeSheet;
+    const rows = collectSheetRows();
+    storeLocalDraft(rows);
+    const saveBtn = byId('saveDraft'); const submitBtn = byId('submitResults');
+    if (action === 'submit') {
+      const pending = rows.filter(r => r.state === 'PENDING');
+      if (pending.length) {
+        actionPopup('Cannot submit yet', `${pending.length} pupil${pending.length===1?' is':'s are'} still marked Pending. Enter a mark or choose Absent / Not Taking first.`, 'error');
+        return;
+      }
+      if (!confirm(`Finish and submit ${current.assignment.subjectName} results for ${current.assignment.className}? After submission the class teacher receives them automatically.`)) return;
+    }
+    if (saveBtn) saveBtn.disabled = true;
+    if (submitBtn) submitBtn.disabled = true;
+    const s = byId('autosaveStatus');
+    if (s) { s.textContent = action==='submit'?'Sending results to the school server…':'Saving draft to the school server…'; s.className='save-state syncing'; }
     try {
-      const result = await api('/api/teacher/sheet', { method:'PUT', body:{ assignmentId:state.activeSheet.assignment.id, assessmentId:state.activeSheet.assessment.id, rows:collectSheetRows(), action } });
-      const s = byId('autosaveStatus'); if (s) s.textContent = action==='submit' ? 'Submitted successfully' : `Saved ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
-      if (action === 'submit') { toast('Results submitted. The class teacher has been notified.'); closeModal(); await navigate('teacher'); }
-      else if (!silent) toast('Draft saved');
-    } catch (err) { if (!silent) toast(err.message, true); else { const s=byId('autosaveStatus'); if(s)s.textContent=`Autosave failed: ${err.message}`; } }
+      const result = await api('/api/teacher/sheet', { method:'PUT', body:{ assignmentId:current.assignment.id, assessmentId:current.assessment.id, rows, action } });
+      storeLocalDraft(rows, { serverSavedAt: result.updatedAt, submittedCopy: action==='submit' });
+      if (s) { s.textContent = action==='submit' ? 'Submitted successfully' : `Saved to school server • ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`; s.className='save-state saved'; }
+      if (action === 'submit') {
+        const assignmentId=current.assignment.id, assessmentId=current.assessment.id;
+        removeLocalDraft(assignmentId, assessmentId);
+        closeModal(true);
+        const who = result.classTeacherName ? `${result.classTeacherName} has been notified as class teacher.` : 'No class teacher is assigned yet; the HOD and administration were notified and the administrator must assign a class teacher.';
+        actionPopup('Results sent successfully', `${result.subjectName || current.assignment.subjectName} results for ${result.className || current.assignment.className} have been submitted. ${who}`);
+        await navigate('teacher');
+      } else if (!silent) {
+        actionPopup('Draft saved', `Your ${current.assignment.subjectName} results for ${current.assignment.className} are saved on this device and on the school server. You can close EduSend and continue later.`);
+      }
+    } catch (err) {
+      if (s) { s.textContent = `Server save failed — your work is still safe on this device. ${err.message}`; s.className='save-state local-only'; }
+      if (!silent) actionPopup('Could not reach school server', `Your work has been kept on this device, but the server did not confirm the save. Reopen the sheet while online and EduSend will try to sync it again. ${err.message}`, 'error');
+    } finally {
+      if (saveBtn) saveBtn.disabled = false;
+      if (submitBtn) submitBtn.disabled = false;
+    }
   }
 
   async function renderClassTeacher(content) {
@@ -526,20 +657,31 @@
 
   async function renderAdmin(content) {
     const d=await api('/api/admin/setup'); const teachers=d.users.filter(u=>(u.roles||[]).includes('TEACHER'));
-    content.innerHTML=`<div class="admin-hero"><div><span class="eyebrow">ADMIN CONTROL CENTRE</span><h2>Configure the school once</h2><p>Staff, departments, classes, subjects, pupils, assessments and report deadlines.</p></div><button id="backupBtn" class="btn btn-gold">Download data backup</button></div>
-    <div class="demo-loader-card"><div><span class="eyebrow">ORIENTATION MODE</span><h3>Lumezi practice school</h3><p>Load 16 classes, 960 fictional pupils, realistic staff roles, nine-subject pupil programmes and teaching assignments so you can practise the complete workflow.</p></div><button id="loadDemoBtn" class="btn btn-primary">${d.school.demoMode?'Reset practice school':'Load practice school'}</button></div>
+    content.innerHTML=`<div class="admin-hero"><div><span class="eyebrow">ADMIN CONTROL CENTRE</span><h2>Configure the school once</h2><p>The administrator creates the structure and officially assigns each class teacher. EduSend recognizes that role immediately.</p></div><button id="backupBtn" class="btn btn-gold">Download data backup</button></div>
+    <div class="demo-loader-card"><div><span class="eyebrow">ORIENTATION MODE</span><h3>Lumezi practice school</h3><p>Load 16 classes, 80 fictional pupils (5 per class), realistic staff roles, nine-subject pupil programmes and teaching assignments so you can practise the complete workflow.</p></div><button id="loadDemoBtn" class="btn btn-primary">${d.school.demoMode?'Reset practice school':'Load practice school'}</button></div>
     <div class="admin-grid">
       <div class="card"><h3>Add staff account</h3><form id="addUserForm" class="stack"><input id="newName" placeholder="Full name" required><input id="newUsername" placeholder="Username" required><input id="newPhone" placeholder="Phone (optional)"><input id="newPassword" value="change123" required><select id="newDept"><option value="">No department</option>${d.departments.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select><select id="newRole"><option value="TEACHER">Teacher</option><option value="HOD_TEACHER">HOD + Teacher</option><option value="HEAD">Head Teacher</option></select><button class="btn btn-primary">Create staff account</button></form></div>
       <div class="card"><h3>Create department / subject</h3><form id="deptForm" class="inline-form"><input id="deptName" placeholder="Department name"><button class="btn btn-secondary">Add department</button></form><hr><form id="subjectForm" class="stack"><input id="subjectName" placeholder="Subject name"><select id="subjectDept">${d.departments.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select><button class="btn btn-primary">Add subject</button></form></div>
       <div class="card"><h3>Create class</h3><form id="classForm" class="stack"><input id="className" placeholder="e.g. 10P" required><input id="classLevel" placeholder="e.g. Grade 10 / Form 1"><select id="classGrading"><option value="CBC">CBC Grades 1–5</option><option value="LEGACY">Legacy Grades 1–9</option></select><button class="btn btn-primary">Create class</button></form></div>
-      <div class="card"><h3>Assign class teacher</h3><form id="classTeacherForm" class="stack"><select id="ctClass">${d.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><select id="ctTeacher">${teachers.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select><button class="btn btn-primary">Assign class teacher</button></form></div>
+      <div class="card class-teacher-explainer"><span class="eyebrow">WHO ASSIGNS CLASS TEACHERS?</span><h3>Administrator</h3><p>The administrator selects a teacher for each class below. The teacher immediately gains <b>Class Progress</b> and <b>Reports</b> access for that class. Reassignment is also controlled here.</p><button class="btn btn-secondary" data-jump-ct>Open assignment centre ↓</button></div>
       <div class="card"><h3>Create assessment & deadline</h3><form id="assessmentForm" class="stack"><input id="assessName" placeholder="Assessment name" required><input id="assessTerm" placeholder="Term"><input id="assessYear" type="number" value="${new Date().getFullYear()}"><input id="assessDue" type="datetime-local" required><button class="btn btn-primary">Create assessment</button></form></div>
       <div class="card"><h3>Add pupil</h3><form id="pupilForm" class="stack"><select id="pupilClass">${d.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input id="pupilName" placeholder="Pupil name" required><div class="two-cols"><select id="pupilSex"><option value="">Sex</option><option value="M">Male</option><option value="F">Female</option></select><input id="pupilExam" placeholder="Exam number"></div><input id="pupilParent" placeholder="Parent/guardian phone"><label class="check-row"><input id="pupilRepeater" type="checkbox"> Repeater</label><button class="btn btn-primary">Add pupil</button></form></div>
       <div class="card"><h3>Import pupils from CSV</h3><p class="tiny muted">Columns: name, sex, examNo, parentPrimary, isRepeater</p><select id="csvClass">${d.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input id="csvFile" type="file" accept=".csv,text/csv"><button id="importCsv" class="btn btn-secondary full">Import CSV</button></div>
       <div class="card"><h3>School details</h3><form id="schoolForm" class="stack"><input id="schoolName" value="${esc(d.school.name||'')}" placeholder="School name"><input id="schoolMotto" value="${esc(d.school.motto||'')}" placeholder="Motto"><input id="schoolAddress" value="${esc(d.school.address||'')}" placeholder="Address"><input id="schoolEmail" value="${esc(d.school.email||'')}" placeholder="Email"><button class="btn btn-secondary">Save school details</button></form></div>
     </div>
+    <div id="classTeacherCentre" class="card space-top"><div class="section-title"><div><span class="eyebrow">CLASS TEACHER ASSIGNMENT CENTRE</span><h3 style="margin-top:4px">One official class teacher per class</h3></div><span class="pill pill-blue">Administrator controlled</span></div><p class="small muted">Choose a teacher and press Assign / Change. EduSend updates the teacher's permissions automatically and sends a notification.</p><div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Level</th><th>Current class teacher</th><th>Assign / change to</th><th></th></tr></thead><tbody>${d.classes.map(c=>{const t=d.users.find(u=>u.id===c.classTeacherUserId);return `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.level)}</td><td>${t?`<span class="pill pill-green">${esc(t.name)}</span>`:'<span class="pill pill-orange">Not assigned</span>'}</td><td><select id="ctPick_${c.id}"><option value="">— Not assigned —</option>${teachers.map(x=>`<option value="${x.id}" ${x.id===c.classTeacherUserId?'selected':''}>${esc(x.name)}</option>`).join('')}</select></td><td><button class="btn btn-secondary" data-set-ct="${c.id}">${t?'Change':'Assign'}</button></td></tr>`}).join('')}</tbody></table></div></div>
     <div class="card space-top"><h3>Classes</h3><div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Level</th><th>Grading</th><th>Class teacher</th></tr></thead><tbody>${d.classes.map(c=>{const t=d.users.find(u=>u.id===c.classTeacherUserId);return `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.level)}</td><td>${esc(c.gradingSystem)}</td><td>${esc(t?.name||'Not assigned')}</td></tr>`}).join('')}</tbody></table></div></div>`;
     wireAdminForms(content,d);
+    content.querySelector('[data-jump-ct]')?.addEventListener('click',()=>byId('classTeacherCentre')?.scrollIntoView({behavior:'smooth',block:'start'}));
+    content.querySelectorAll('[data-set-ct]').forEach(btn=>btn.addEventListener('click',async()=>{
+      const classId=btn.dataset.setCt; const picker=byId(`ctPick_${classId}`); const teacherUserId=picker?.value||null;
+      btn.disabled=true; const old=btn.textContent; btn.textContent='Saving…';
+      try{
+        const r=await api('/api/admin/class-teacher',{method:'POST',body:{classId,teacherUserId}});
+        actionPopup(teacherUserId?'Class teacher assigned':'Class teacher cleared', teacherUserId?`${r.class.name} is now assigned to ${r.classTeacherName}. EduSend has updated the teacher's class-teacher access automatically.`:`${r.class.name} currently has no class teacher. Assign one before reports are released.`);
+        await renderAdmin(content);
+      }catch(err){actionPopup('Could not update class teacher',err.message,'error');btn.disabled=false;btn.textContent=old;}
+    }));
   }
 
   function wireAdminForms(content,d){
@@ -561,7 +703,6 @@
     byId('deptForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/department',{method:'POST',body:{name:byId('deptName').value}});toast('Department created');await renderAdmin(content)}catch(err){toast(err.message,true)}};
     byId('subjectForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/subject',{method:'POST',body:{name:byId('subjectName').value,departmentId:byId('subjectDept').value}});toast('Subject created');await renderAdmin(content)}catch(err){toast(err.message,true)}};
     byId('classForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/class',{method:'POST',body:{name:byId('className').value,level:byId('classLevel').value,gradingSystem:byId('classGrading').value}});toast('Class created');await renderAdmin(content)}catch(err){toast(err.message,true)}};
-    byId('classTeacherForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/class-teacher',{method:'POST',body:{classId:byId('ctClass').value,teacherUserId:byId('ctTeacher').value}});toast('Class teacher assigned');await bootstrap()}catch(err){toast(err.message,true)}};
     byId('assessmentForm').onsubmit=async e=>{e.preventDefault();try{const due=new Date(byId('assessDue').value).toISOString();await api('/api/admin/assessment',{method:'POST',body:{name:byId('assessName').value,term:byId('assessTerm').value,year:byId('assessYear').value,dueAt:due}});toast('Assessment created');const a=await api('/api/assessments');state.assessments=a.assessments;await renderAdmin(content)}catch(err){toast(err.message,true)}};
     byId('pupilForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/pupil',{method:'POST',body:{classId:byId('pupilClass').value,name:byId('pupilName').value,sex:byId('pupilSex').value,examNo:byId('pupilExam').value,parentPrimary:byId('pupilParent').value,isRepeater:byId('pupilRepeater').checked}});toast('Pupil added');byId('pupilName').value='';}catch(err){toast(err.message,true)}};
     byId('schoolForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/school',{method:'POST',body:{name:byId('schoolName').value,motto:byId('schoolMotto').value,address:byId('schoolAddress').value,email:byId('schoolEmail').value}});toast('School details saved');await bootstrap()}catch(err){toast(err.message,true)}};
@@ -576,10 +717,33 @@
   async function renderAudit(content){const d=await api('/api/admin/audit');content.innerHTML=`<div class="page-intro"><div><h3>Audit trail</h3><p>Who changed what, and when.</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Time</th><th>User</th><th>Action</th><th>Detail</th></tr></thead><tbody>${d.rows.map(r=>`<tr><td>${fmtDate(r.at)}</td><td>${esc(r.actorName)}</td><td><b>${esc(r.action)}</b></td><td>${esc(r.detail)}</td></tr>`).join('')}</tbody></table></div>`;}
 
   function showModal(html){closeModal();const w=document.createElement('div');w.className='modal-backdrop';w.id='modalBackdrop';w.innerHTML=`<div class="modal">${html}</div>`;document.body.appendChild(w);w.onclick=e=>{if(e.target===w||e.target.matches('[data-close]'))closeModal()};}
-  function closeModal(){clearTimeout(state.autosaveTimer);byId('modalBackdrop')?.remove();state.activeSheet=null;}
+  function closeModal(skipSnapshot=false){clearTimeout(state.autosaveTimer);if(!skipSnapshot)snapshotActiveDraft();byId('modalBackdrop')?.remove();state.activeSheet=null;}
 
-  function connectEvents(){disconnectEvents();if(!state.token)return;const es=new EventSource(`/api/events?token=${encodeURIComponent(state.token)}`);state.eventSource=es;es.addEventListener('update',async e=>{let d={};try{d=JSON.parse(e.data)}catch{}if(d.type==='NOTIFICATION'){toast(d.notification?.title||'New notification');await refreshNotifications()}if(state.page==='classTeacher'&&d.type==='RESULT_SHEET_UPDATED'){const c=byId('classSelect'),a=byId('assessmentSelect');if(c&&a)loadClassOverview(c.value,a.value).catch(()=>{})}if(state.page==='hodProgress'&&d.type==='RESULT_SHEET_UPDATED')navigate('hodProgress');if(state.page==='schoolProgress'&&d.type==='RESULT_SHEET_UPDATED')navigate('schoolProgress');if(state.page==='escalations'&&d.type==='ESCALATION_UPDATED')navigate('escalations')});state.refreshTimer=setInterval(()=>{if(state.page==='classTeacher'){const c=byId('classSelect'),a=byId('assessmentSelect');if(c&&a)loadClassOverview(c.value,a.value).catch(()=>{})}},20000);state.notificationTimer=setInterval(refreshNotifications,30000);}
+  function connectEvents(){
+    disconnectEvents();if(!state.token)return;
+    const es=new EventSource(`/api/events?token=${encodeURIComponent(state.token)}`);state.eventSource=es;
+    es.addEventListener('update',async e=>{
+      let d={};try{d=JSON.parse(e.data)}catch{}
+      if(d.type==='NOTIFICATION'){
+        toast(d.notification?.title||'New notification');
+        if(d.notification?.type==='RESULTS_SUBMITTED') actionPopup(d.notification.title||'Results received',d.notification.message||'A subject teacher submitted results.');
+        await refreshNotifications();
+      }
+      if(d.type==='CLASS_TEACHER_UPDATED'){
+        try{const fresh=await api('/api/me');state.me=fresh;renderShell();await refreshNotifications();await navigate('dashboard');toast('Your class-teacher access has been updated');}catch{}
+      }
+      if(state.page==='classTeacher'&&d.type==='RESULT_SHEET_UPDATED'){const c=byId('classSelect'),a=byId('assessmentSelect');if(c&&a)loadClassOverview(c.value,a.value).catch(()=>{})}
+      if(state.page==='hodProgress'&&d.type==='RESULT_SHEET_UPDATED')navigate('hodProgress');
+      if(state.page==='schoolProgress'&&d.type==='RESULT_SHEET_UPDATED')navigate('schoolProgress');
+      if(state.page==='escalations'&&d.type==='ESCALATION_UPDATED')navigate('escalations');
+    });
+    state.refreshTimer=setInterval(()=>{if(state.page==='classTeacher'){const c=byId('classSelect'),a=byId('assessmentSelect');if(c&&a)loadClassOverview(c.value,a.value).catch(()=>{})}},20000);
+    state.notificationTimer=setInterval(refreshNotifications,30000);
+  }
   function disconnectEvents(){if(state.eventSource){state.eventSource.close();state.eventSource=null}if(state.refreshTimer){clearInterval(state.refreshTimer);state.refreshTimer=null}if(state.notificationTimer){clearInterval(state.notificationTimer);state.notificationTimer=null}}
+
+  window.addEventListener('pagehide', syncActiveDraftOnHide);
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')syncActiveDraftOnHide();});
 
   if(state.token) bootstrap(); else renderLogin();
 })();
