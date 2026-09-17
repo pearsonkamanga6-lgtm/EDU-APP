@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION = '2.2.1';
+  const APP_VERSION = '2.3.0';
   const app = document.getElementById('app');
   const state = {
     token: localStorage.getItem('edusend_token') || '',
@@ -302,7 +302,7 @@
         <article class="practice-step"><span>5</span><div><b>Escalate a late subject</b><p>As a class teacher, choose an outstanding subject and press Escalate. Then sign in as the HOD or Administrator to follow the escalation path.</p></div></article>
         <article class="practice-step"><span>6</span><div><b>Generate reports</b><p>When all required subjects are submitted, the class teacher opens Reports. CBC classes use Grades 1–5; Grade 10–12 use the legacy profile. Not Taking never becomes zero.</p></div></article>
       </div>
-      <div class="card space-top"><h3>Practice school structure</h3><p class="muted">Form 1: 1L, 1M • Form 2: 2L, 2M • Grade 10: 10N, 10M, 10P, 10L • Grade 11: 11M, 11N, 11P, 11L • Grade 12: 12M, 12N, 12P, 12L. Each class has 5 fictional pupils. Form 1–2 pupils take seven common subjects plus either Biology + Home Economics or Design & Technology + Physics, giving nine subjects per pupil.</p></div>`;
+      <div class="card space-top"><h3>Practice school structure</h3><p class="muted">Form 1: 1L, 1M • Form 2: 2L, 2M • Grade 10: 10N, 10M, 10P, 10L • Grade 11: 11M, 11N, 11P, 11L • Grade 12: 12M, 12N, 12P, 12L. Each class has 5 fictional pupils. Every class is staffed by nine distinct practice teachers. In Form 1–2, the two option-track teachers each handle the paired option subjects, so pupils still take exactly nine subjects.</p><p class="small"><b>Practice teacher password:</b> <code>teach123</code>. HOD password: <code>hod123</code>. Open Administrator → School Setup → Staff & Teaching Load to see every teacher, username, subject and class allocation.</p></div>`;
   }
 
   async function renderDashboard(content) {
@@ -316,7 +316,7 @@
     const classCount = state.me.classTeacherClasses?.length || 0;
     const firstName = (state.me.user.name || '').replace(/^Mr\.?\s+|^Mrs\.?\s+|^Ms\.?\s+/i,'').split(' ')[0] || state.me.user.name;
     content.innerHTML = `
-      <section class="hero-card"><div><span class="eyebrow">EDUSEND V2.2.1</span><h1>Welcome, ${esc(firstName)}</h1><p>Enter results once. EduSend moves them to the right class teacher automatically.</p></div><div class="hero-orb">ES</div></section>
+      <section class="hero-card"><div><span class="eyebrow">EDUSEND V2.3</span><h1>Welcome, ${esc(firstName)}</h1><p>Enter results once. EduSend moves them to the right class teacher automatically.</p></div><div class="hero-orb">ES</div></section>
       ${deadlineBanner(rem.reminders)}
       <div class="grid grid-4 stats-grid">
         <div class="card stat-card"><div class="stat">${assignments.length}</div><div class="stat-label">Teaching allocations</div></div>
@@ -392,7 +392,7 @@
         <div id="autosaveStatus" class="save-state ${readOnly?'saved':''}">${readOnly?'Submitted '+fmtDate(d.sheet.submittedAt):recovered?'Recovered locally — syncing to school server…':d.sheet.updatedAt?'Last server save '+fmtDate(d.sheet.updatedAt):'Ready — not yet saved'}</div>
         <div class="table-wrap"><table class="table result-entry"><thead><tr><th>#</th><th>Pupil</th><th class="center">Mark %</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
       </div>
-      <div class="modal-foot"><button class="btn btn-secondary" data-close>Close</button>${readOnly?'':`${state.me?.school?.demoMode?'<button id="fillDemoMarks" class="btn btn-gold">Fill demo marks</button>':''}<button id="saveDraft" class="btn btn-secondary">Save Draft</button><button id="submitResults" class="btn btn-green">Finish & Submit</button>`}</div>`);
+      <div class="modal-foot"><button class="btn btn-secondary" data-close>Close</button>${readOnly?'':`${state.me?.school?.demoMode?'<button type="button" id="fillDemoMarks" class="btn btn-gold">Fill demo marks</button>':''}<button type="button" id="saveDraft" class="btn btn-secondary">Save Draft</button><button type="button" id="submitResults" class="btn btn-green">Finish & Submit</button>`}</div>`);
     if (!readOnly) {
       const localThenAutosave = () => { snapshotActiveDraft(); scheduleAutosave(); };
       document.querySelectorAll('[data-mark],[data-state]').forEach(el => el.addEventListener('input', localThenAutosave));
@@ -458,7 +458,7 @@
     try {
       const result = await api('/api/teacher/sheet', { method:'PUT', body:{ assignmentId:current.assignment.id, assessmentId:current.assessment.id, rows, action } });
       storeLocalDraft(rows, { serverSavedAt: result.updatedAt, submittedCopy: action==='submit' });
-      if (s) { s.textContent = action==='submit' ? 'Submitted successfully' : `Saved to school server • ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`; s.className='save-state saved'; }
+      if (s) { s.textContent = action==='submit' ? `Submitted successfully • receipt #${result.storageRevision||'—'}` : `Saved to school server • receipt #${result.storageRevision||'—'} • ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`; s.className='save-state saved'; }
       if (action === 'submit') {
         const assignmentId=current.assignment.id, assessmentId=current.assessment.id;
         removeLocalDraft(assignmentId, assessmentId);
@@ -670,7 +670,7 @@
       <div class="card"><h3>School details</h3><form id="schoolForm" class="stack"><input id="schoolName" value="${esc(d.school.name||'')}" placeholder="School name"><input id="schoolMotto" value="${esc(d.school.motto||'')}" placeholder="Motto"><input id="schoolAddress" value="${esc(d.school.address||'')}" placeholder="Address"><input id="schoolEmail" value="${esc(d.school.email||'')}" placeholder="Email"><button class="btn btn-secondary">Save school details</button></form></div>
     </div>
     <div id="classTeacherCentre" class="card space-top"><div class="section-title"><div><span class="eyebrow">CLASS TEACHER ASSIGNMENT CENTRE</span><h3 style="margin-top:4px">One official class teacher per class</h3></div><span class="pill pill-blue">Administrator controlled</span></div><p class="small muted">Choose a teacher and press Assign / Change. EduSend updates the teacher's permissions automatically and sends a notification.</p><div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Level</th><th>Current class teacher</th><th>Assign / change to</th><th></th></tr></thead><tbody>${d.classes.map(c=>{const t=d.users.find(u=>u.id===c.classTeacherUserId);return `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.level)}</td><td>${t?`<span class="pill pill-green">${esc(t.name)}</span>`:'<span class="pill pill-orange">Not assigned</span>'}</td><td><select id="ctPick_${c.id}"><option value="">— Not assigned —</option>${teachers.map(x=>`<option value="${x.id}" ${x.id===c.classTeacherUserId?'selected':''}>${esc(x.name)}</option>`).join('')}</select></td><td><button class="btn btn-secondary" data-set-ct="${c.id}">${t?'Change':'Assign'}</button></td></tr>`}).join('')}</tbody></table></div></div>
-    <div class="card space-top"><h3>Classes</h3><div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Level</th><th>Grading</th><th>Class teacher</th></tr></thead><tbody>${d.classes.map(c=>{const t=d.users.find(u=>u.id===c.classTeacherUserId);return `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.level)}</td><td>${esc(c.gradingSystem)}</td><td>${esc(t?.name||'Not assigned')}</td></tr>`}).join('')}</tbody></table></div></div>`;
+    <div class="card space-top"><div class="section-title"><div><span class="eyebrow">STAFF & TEACHING LOAD</span><h3 style="margin-top:4px">Practice teacher directory</h3></div><span class="pill pill-blue">${teachers.length} teachers</span></div><p class="small muted">Every practice class has nine distinct teachers. The same teacher may teach several classes, just as in a real timetable. All ordinary practice teachers use password <b>teach123</b>.</p><div class="table-wrap"><table class="table"><thead><tr><th>Teacher</th><th>Username</th><th>Department</th><th>Teaching load</th><th>Class teacher of</th></tr></thead><tbody>${teachers.map(t=>{const loads=d.teachingAssignments.filter(a=>a.teacherUserId===t.id);const cls=d.classes.filter(c=>c.classTeacherUserId===t.id).map(c=>c.name);const dep=d.departments.find(x=>x.id===t.departmentId);return `<tr><td><b>${esc(t.name)}</b></td><td><code>${esc(t.username)}</code></td><td>${esc(dep?.name||'Multi-department')}</td><td>${loads.length?loads.map(a=>`${esc(a.className)} ${esc(a.subjectName)}`).join('<br>'):'—'}</td><td>${cls.length?esc(cls.join(', ')):'—'}</td></tr>`}).join('')}</tbody></table></div></div><div class="card space-top"><h3>Classes</h3><div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Level</th><th>Grading</th><th>Class teacher</th></tr></thead><tbody>${d.classes.map(c=>{const t=d.users.find(u=>u.id===c.classTeacherUserId);return `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.level)}</td><td>${esc(c.gradingSystem)}</td><td>${esc(t?.name||'Not assigned')}</td></tr>`}).join('')}</tbody></table></div></div>`;
     wireAdminForms(content,d);
     content.querySelector('[data-jump-ct]')?.addEventListener('click',()=>byId('classTeacherCentre')?.scrollIntoView({behavior:'smooth',block:'start'}));
     content.querySelectorAll('[data-set-ct]').forEach(btn=>btn.addEventListener('click',async()=>{
@@ -716,7 +716,7 @@
 
   async function renderAudit(content){const d=await api('/api/admin/audit');content.innerHTML=`<div class="page-intro"><div><h3>Audit trail</h3><p>Who changed what, and when.</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Time</th><th>User</th><th>Action</th><th>Detail</th></tr></thead><tbody>${d.rows.map(r=>`<tr><td>${fmtDate(r.at)}</td><td>${esc(r.actorName)}</td><td><b>${esc(r.action)}</b></td><td>${esc(r.detail)}</td></tr>`).join('')}</tbody></table></div>`;}
 
-  function showModal(html){closeModal();const w=document.createElement('div');w.className='modal-backdrop';w.id='modalBackdrop';w.innerHTML=`<div class="modal">${html}</div>`;document.body.appendChild(w);w.onclick=e=>{if(e.target===w||e.target.matches('[data-close]'))closeModal()};}
+  function showModal(html){byId('modalBackdrop')?.remove();const w=document.createElement('div');w.className='modal-backdrop';w.id='modalBackdrop';w.innerHTML=`<div class="modal">${html}</div>`;document.body.appendChild(w);w.onclick=e=>{if(e.target===w||e.target.matches('[data-close]'))closeModal()};}
   function closeModal(skipSnapshot=false){clearTimeout(state.autosaveTimer);if(!skipSnapshot)snapshotActiveDraft();byId('modalBackdrop')?.remove();state.activeSheet=null;}
 
   function connectEvents(){
