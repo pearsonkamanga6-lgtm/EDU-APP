@@ -1,0 +1,13 @@
+EDUSEND PWA PUBLIC FILES
+
+1. Extract this ZIP on your phone or computer.
+2. Open your GitHub EDU-APP-1 repository.
+3. Open the existing public folder.
+4. Upload ALL files inside this ZIP's public folder into the GitHub public folder.
+5. Keep the icons folder and its three PNG files.
+6. If GitHub asks whether to replace index.html, app.js, or styles.css, use the versions from this package only if this is the same EduSend V1.1 codebase.
+7. Commit the changes.
+8. Render: Manual Deploy -> Deploy latest commit.
+9. Open the live Render site in Chrome and look for Install app / Install EduSend.
+
+Important: Do not upload the ZIP itself to GitHub expecting it to extract automatically.
