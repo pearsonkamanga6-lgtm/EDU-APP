@@ -1,4 +1,5 @@
 (() => {
+  const APP_VERSION = '2.0.0';
   const app = document.getElementById('app');
   const state = {
     token: localStorage.getItem('edusend_token') || '',
@@ -6,396 +7,528 @@
     assessments: [],
     page: 'dashboard',
     eventSource: null,
-    refreshTimer: null
+    refreshTimer: null,
+    notificationTimer: null,
+    unread: 0,
+    activeSheet: null,
+    autosaveTimer: null
   };
 
   const esc = (s) => String(s ?? '').replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
-  const fmtDate = (s) => s ? new Date(s).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—';
   const byId = (id) => document.getElementById(id);
+  const fmtDate = (s) => s ? new Date(s).toLocaleString([], { dateStyle:'medium', timeStyle:'short' }) : '—';
+  const firstAssessmentId = () => state.assessments[0]?.id || '';
+  const roles = () => state.me?.user?.roles || [];
+  const isRole = r => roles().includes(r);
+  const isClassTeacher = () => !!state.me?.classTeacherClasses?.length;
 
-  function statusPill(status, deadline) {
-    const st = status || 'NOT_STARTED';
-    if (st === 'LOCKED') return '<span class="pill pill-violet">Locked</span>';
-    if (st === 'SUBMITTED') return '<span class="pill pill-green">Submitted</span>';
-    if (st === 'DRAFT') return '<span class="pill pill-blue">Draft</span>';
-    if (deadline?.code === 'OVERDUE') return '<span class="pill pill-red">Overdue</span>';
-    if (deadline?.code === 'DUE_SOON') return '<span class="pill pill-orange">Due soon</span>';
-    return '<span class="pill pill-grey">Not started</span>';
-  }
-
-  function deadlineBanner(reminders) {
-    if (!reminders?.length) return '<div class="alert alert-green"><b>✓ All assigned result sheets are submitted.</b> No outstanding result entry reminders.</div>';
-    const overdue = reminders.filter(r => r.deadline.code === 'OVERDUE');
-    const soon = reminders.filter(r => r.deadline.code === 'DUE_SOON');
-    if (overdue.length) return `<div class="alert alert-red"><b>${overdue.length} result sheet${overdue.length === 1 ? '' : 's'} overdue.</b> Please enter and submit the outstanding results immediately.</div>`;
-    if (soon.length) return `<div class="alert alert-orange"><b>${soon.length} result sheet${soon.length === 1 ? '' : 's'} due soon.</b> Complete them before the deadline.</div>`;
-    return `<div class="alert alert-blue"><b>${reminders.length} result sheet${reminders.length === 1 ? '' : 's'} still open.</b> The app will keep reminding you as the deadline approaches.</div>`;
+  function toast(message, bad = false) {
+    let el = document.querySelector('.toast');
+    if (!el) {
+      el = document.createElement('div'); el.className = 'toast'; document.body.appendChild(el);
+    }
+    el.classList.toggle('bad', bad); el.textContent = message; el.style.display = 'block';
+    clearTimeout(el._t); el._t = setTimeout(() => el.style.display = 'none', 3600);
   }
 
   async function api(path, opts = {}) {
     const headers = { ...(opts.headers || {}) };
     if (state.token) headers.Authorization = `Bearer ${state.token}`;
     if (opts.body && !(opts.body instanceof FormData)) headers['Content-Type'] = 'application/json';
-    const res = await fetch(path, { ...opts, headers, body: opts.body && !(opts.body instanceof FormData) && typeof opts.body !== 'string' ? JSON.stringify(opts.body) : opts.body });
+    const body = opts.body && !(opts.body instanceof FormData) && typeof opts.body !== 'string' ? JSON.stringify(opts.body) : opts.body;
+    const res = await fetch(path, { ...opts, headers, body, cache: 'no-store' });
     const data = await res.json().catch(() => ({}));
-    if (res.status === 401) {
-      logout(false);
-      throw new Error(data.error || 'Session expired');
-    }
+    if (res.status === 401) { logout(false); throw new Error(data.error || 'Session expired'); }
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     return data;
   }
 
-  function toast(message, bad = false) {
-    let el = document.querySelector('.toast');
-    if (!el) {
-      el = document.createElement('div');
-      el.className = 'toast';
-      Object.assign(el.style, {position:'fixed',right:'16px',bottom:'16px',zIndex:'100',padding:'12px 14px',borderRadius:'10px',color:'#fff',fontWeight:'700',fontSize:'13px',boxShadow:'0 12px 40px #0004'});
-      document.body.appendChild(el);
+  async function checkVersion() {
+    try {
+      const d = await fetch(`/api/version?t=${Date.now()}`, { cache:'no-store' }).then(r => r.json());
+      if (d.version && d.version !== APP_VERSION) showUpdateBanner(d.version);
+    } catch {}
+  }
+
+  function showUpdateBanner(serverVersion) {
+    let banner = byId('updateBanner');
+    if (!banner) {
+      banner = document.createElement('div'); banner.id = 'updateBanner'; banner.className = 'update-banner';
+      banner.innerHTML = `<b>EduSend update available.</b> <span>Server v${esc(serverVersion)} • App v${APP_VERSION}</span><button id="applyUpdate" class="btn btn-gold">Update now</button>`;
+      document.body.appendChild(banner);
+      byId('applyUpdate').onclick = async () => {
+        try {
+          if ('serviceWorker' in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            for (const r of regs) await r.update().catch(() => {});
+          }
+        } catch {}
+        location.reload(true);
+      };
     }
-    el.style.background = bad ? '#a61b1b' : '#0b6f51';
-    el.textContent = message;
-    el.style.display = 'block';
-    clearTimeout(el._t);
-    el._t = setTimeout(() => el.style.display = 'none', 3500);
+  }
+
+  function statusPill(status, deadline) {
+    if (status === 'LOCKED') return '<span class="pill pill-violet">Locked</span>';
+    if (status === 'SUBMITTED') return '<span class="pill pill-green">Submitted</span>';
+    if (status === 'CORRECTION_REQUESTED') return '<span class="pill pill-orange">Correction requested</span>';
+    if (status === 'DRAFT') return '<span class="pill pill-blue">Draft</span>';
+    if (deadline?.code === 'OVERDUE') return '<span class="pill pill-red">Overdue</span>';
+    if (deadline?.code === 'DUE_SOON') return '<span class="pill pill-orange">Due soon</span>';
+    return '<span class="pill pill-grey">Not started</span>';
+  }
+
+  function deadlineBanner(reminders) {
+    if (!reminders?.length) return '<div class="alert alert-green"><b>✓ All your assigned result sheets are complete.</b></div>';
+    const overdue = reminders.filter(r => r.deadline.code === 'OVERDUE');
+    const soon = reminders.filter(r => r.deadline.code === 'DUE_SOON');
+    if (overdue.length) return `<div class="alert alert-red"><b>${overdue.length} sheet${overdue.length===1?'':'s'} overdue.</b> Open My Result Sheets and finish them.</div>`;
+    if (soon.length) return `<div class="alert alert-orange"><b>${soon.length} sheet${soon.length===1?'':'s'} due soon.</b> Finish them before the deadline.</div>`;
+    return `<div class="alert alert-blue"><b>${reminders.length} result sheet${reminders.length===1?'':'s'} still open.</b></div>`;
   }
 
   function renderLogin() {
     disconnectEvents();
     app.innerHTML = `
       <div class="login-page">
-        <div class="login-card">
-          <div class="brand">
-            <div class="brand-mark">ES</div>
-            <div><h1>EduSend School Results</h1><p>Role-based results management — V1.2.1</p></div>
-          </div>
-          <div class="alert alert-blue small"><b>V1.2.1:</b> Administrator → HOD → Subject Teacher → Class Teacher workflow, with result-entry deadlines and live class updates.</div>
+        <div class="login-card premium-login">
+          <div class="brand"><div class="brand-mark">ES</div><div><h1>EduSend School Results</h1><p>One mark entry. One school workflow. — V2.0</p></div></div>
+          <div class="login-hero"><b>School Results Workflow</b><span>Teachers enter once • Class teachers receive automatically • Parents get reports</span></div>
           <form id="loginForm">
-            <div class="field"><label>Username</label><input id="username" autocomplete="username" value="kamanga" required /></div>
-            <div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password" value="teach123" required /></div>
-            <button class="btn btn-primary full" type="submit">Sign in</button>
+            <div class="field"><label>Username</label><input id="username" autocomplete="username" value="kamanga" required></div>
+            <div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password" value="teach123" required></div>
+            <button class="btn btn-primary full btn-lg" type="submit">Sign in to EduSend</button>
           </form>
           <div class="demo-box">
-            <div class="quick-login-head">
-              <div><b class="small">Quick sign-in — starter accounts</b><div class="tiny muted">Tap an account to sign in immediately.</div></div>
-            </div>
+            <div class="quick-login-head"><div><b>Starter accounts</b><div class="tiny muted">Tap an account to test each role.</div></div></div>
             <div class="demo-grid" style="margin-top:10px">
-              <button type="button" class="demo-account" data-username="admin" data-password="admin123"><span class="demo-role">Administrator</span><span class="demo-user">admin</span><span class="demo-go">Sign in →</span></button>
-              <button type="button" class="demo-account" data-username="head" data-password="head123"><span class="demo-role">Head Teacher</span><span class="demo-user">head</span><span class="demo-go">Sign in →</span></button>
-              <button type="button" class="demo-account" data-username="hod.science" data-password="hod123"><span class="demo-role">Science HOD</span><span class="demo-user">hod.science</span><span class="demo-go">Sign in →</span></button>
-              <button type="button" class="demo-account" data-username="hod.languages" data-password="hod123"><span class="demo-role">Languages HOD</span><span class="demo-user">hod.languages</span><span class="demo-go">Sign in →</span></button>
-              <button type="button" class="demo-account" data-username="hod.social" data-password="hod123"><span class="demo-role">Social Sciences HOD</span><span class="demo-user">hod.social</span><span class="demo-go">Sign in →</span></button>
-              <button type="button" class="demo-account" data-username="hod.commercial" data-password="hod123"><span class="demo-role">Commercial Studies HOD</span><span class="demo-user">hod.commercial</span><span class="demo-go">Sign in →</span></button>
-              <button type="button" class="demo-account" data-username="kamanga" data-password="teach123"><span class="demo-role">Mr Kamanga P</span><span class="demo-user">Teacher • Class Teacher</span><span class="demo-go">Sign in →</span></button>
-              <button type="button" class="demo-account" data-username="english.teacher" data-password="teach123"><span class="demo-role">English Teacher</span><span class="demo-user">english.teacher</span><span class="demo-go">Sign in →</span></button>
+              ${demoAccount('Administrator','admin','admin123')}
+              ${demoAccount('Head Teacher','head','head123')}
+              ${demoAccount('Science HOD','hod.science','hod123')}
+              ${demoAccount('Languages HOD','hod.languages','hod123')}
+              ${demoAccount('Social Sciences HOD','hod.social','hod123')}
+              ${demoAccount('Commercial Studies HOD','hod.commercial','hod123')}
+              ${demoAccount('Mr Kamanga P','kamanga','teach123','Teacher • Class Teacher')}
+              ${demoAccount('English Teacher','english.teacher','teach123')}
             </div>
-            <p class="tiny muted" style="margin-bottom:0">Starter accounts are for setup/testing. We will replace them with real staff accounts and private passwords as we continue building.</p>
           </div>
         </div>
       </div>`;
-    document.querySelectorAll('.demo-account').forEach(card => {
-      card.addEventListener('click', () => {
-        byId('username').value = card.dataset.username || '';
-        byId('password').value = card.dataset.password || '';
-        document.querySelectorAll('.demo-account').forEach(x => x.classList.remove('selected'));
-        card.classList.add('selected');
-        byId('loginForm').requestSubmit();
-      });
-    });
-
-    byId('loginForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = e.submitter || byId('loginForm').querySelector('button[type="submit"]');
-      btn.disabled = true; btn.textContent = 'Signing in...';
+    document.querySelectorAll('.demo-account').forEach(card => card.addEventListener('click', () => {
+      byId('username').value = card.dataset.username; byId('password').value = card.dataset.password; byId('loginForm').requestSubmit();
+    }));
+    byId('loginForm').addEventListener('submit', async e => {
+      e.preventDefault(); const btn = e.submitter || e.target.querySelector('button[type="submit"]');
+      btn.disabled = true; btn.textContent = 'Signing in…';
       try {
-        const data = await api('/api/login', { method: 'POST', body: { username: byId('username').value, password: byId('password').value } });
-        state.token = data.token;
-        localStorage.setItem('edusend_token', state.token);
-        await bootstrap();
-      } catch (err) {
-        toast(err.message, true);
-      } finally {
-        btn.disabled = false; btn.textContent = 'Sign in';
-      }
+        const d = await api('/api/login', { method:'POST', body:{ username:byId('username').value, password:byId('password').value } });
+        state.token = d.token; localStorage.setItem('edusend_token', state.token); await bootstrap();
+      } catch (err) { toast(err.message, true); }
+      finally { btn.disabled = false; btn.textContent = 'Sign in to EduSend'; }
     });
   }
 
+  function demoAccount(role, username, password, note='') {
+    return `<button type="button" class="demo-account" data-username="${esc(username)}" data-password="${esc(password)}"><span class="demo-role">${esc(role)}</span><span class="demo-user">${esc(note || username)}</span><span class="demo-go">Open →</span></button>`;
+  }
+
   function logout(show = true) {
-    state.token = '';
-    state.me = null;
-    localStorage.removeItem('edusend_token');
-    disconnectEvents();
-    renderLogin();
-    if (show) toast('Signed out');
+    state.token = ''; state.me = null; localStorage.removeItem('edusend_token'); disconnectEvents(); renderLogin(); if (show) toast('Signed out');
   }
 
   async function bootstrap() {
     try {
       const [me, assessments] = await Promise.all([api('/api/me'), api('/api/assessments')]);
-      state.me = me;
-      state.assessments = assessments.assessments || [];
-      renderShell();
-      connectEvents();
-      await navigate('dashboard');
+      state.me = me; state.assessments = assessments.assessments || [];
+      renderShell(); connectEvents(); await refreshNotifications(); await navigate('dashboard'); checkVersion();
     } catch (err) {
-      state.token = '';
-      localStorage.removeItem('edusend_token');
-      renderLogin();
-      toast(err.message, true);
+      state.token = ''; localStorage.removeItem('edusend_token'); renderLogin(); toast(err.message, true);
     }
   }
 
   function roleNames() {
-    const roles = state.me?.user?.roles || [];
-    const out = [...roles];
-    if (state.me?.classTeacherClasses?.length) out.push('CLASS TEACHER');
-    return out;
+    const out = [...roles()]; if (isClassTeacher()) out.push('CLASS TEACHER'); return out;
   }
 
   function navItems() {
-    const roles = state.me.user.roles || [];
-    const items = [{ id:'dashboard', label:'Dashboard' }];
-    if (roles.includes('TEACHER')) items.push({ id:'teacher', label:'My Result Sheets' });
-    if (state.me.classTeacherClasses?.length || roles.includes('ADMIN') || roles.includes('HEAD')) items.push({ id:'classTeacher', label:'Class Results' });
-    if (roles.includes('HOD')) {
-      items.push({ id:'hodAssignments', label:'Department Assignments' });
-      items.push({ id:'hodProgress', label:'Department Progress' });
+    const items = [{ id:'dashboard', label:'Home', icon:'⌂' }];
+    if (isRole('TEACHER')) items.push({ id:'teacher', label:'Enter Results', icon:'✎' });
+    if (isClassTeacher() || isAdminOrHeadFront()) {
+      items.push({ id:'classTeacher', label:'Class Progress', icon:'▦' });
+      items.push({ id:'reports', label:'Reports', icon:'▤' });
     }
-    if (roles.includes('ADMIN')) items.push({ id:'admin', label:'School Setup' });
-    if (roles.includes('ADMIN') || roles.includes('HEAD')) items.push({ id:'schoolProgress', label:'School Progress' });
+    items.push({ id:'notifications', label:'Notifications', icon:'●' });
+    if (isRole('HOD')) { items.push({ id:'hodAssignments', label:'Assignments', icon:'⇄' }); items.push({ id:'hodProgress', label:'Dept Progress', icon:'◫' }); }
+    if (isClassTeacher() || isRole('HOD') || isAdminOrHeadFront()) items.push({ id:'escalations', label:'Escalations', icon:'!' });
+    if (isRole('ADMIN')) items.push({ id:'admin', label:'School Setup', icon:'⚙' });
+    if (isAdminOrHeadFront()) { items.push({ id:'schoolProgress', label:'School Progress', icon:'◉' }); items.push({ id:'audit', label:'Audit', icon:'≡' }); }
     return items;
   }
+  function isAdminOrHeadFront() { return isRole('ADMIN') || isRole('HEAD'); }
 
   function renderShell() {
-    const u = state.me.user;
-    const nav = navItems().map(n => `<button data-nav="${n.id}">${esc(n.label)}</button>`).join('');
-    const chips = roleNames().map(r => `<span class="role-chip">${esc(r)}</span>`).join('');
+    const u = state.me.user; const items = navItems();
+    const nav = items.map(n => `<button data-nav="${n.id}"><span class="nav-ico">${n.icon}</span><span>${esc(n.label)}</span>${n.id==='notifications'?'<span id="sideUnread" class="nav-badge hidden">0</span>':''}</button>`).join('');
+    const bottom = items.slice(0, 7).map(n => `<button data-nav="${n.id}"><span>${n.icon}</span><small>${esc(n.label)}</small>${n.id==='notifications'?'<i id="mobileUnread" class="mobile-unread hidden"></i>':''}</button>`).join('');
     app.innerHTML = `
       <div class="shell">
         <aside class="sidebar">
-          <div class="side-brand"><div class="brand-mark">ES</div><div><strong>EduSend</strong><div class="tiny">School Results V1.2.1</div></div></div>
+          <div class="side-brand"><div class="brand-mark">ES</div><div><strong>EduSend</strong><div class="tiny">School Results V2.0</div></div></div>
           <div class="nav">${nav}</div>
-          <div class="side-user"><div class="name">${esc(u.name)}</div><div>${chips}</div><button id="logoutBtn" class="btn btn-secondary" style="margin-top:12px;width:100%">Sign out</button></div>
+          <div class="side-user"><div class="name">${esc(u.name)}</div><div>${roleNames().map(r=>`<span class="role-chip">${esc(r)}</span>`).join('')}</div><button id="logoutBtn" class="btn btn-secondary full" style="margin-top:12px">Sign out</button></div>
         </aside>
         <main class="main">
-          <header class="topbar"><div><h2 id="pageTitle">Dashboard</h2><div class="tiny muted">${esc(state.me.school.name)}</div></div><div class="topbar-user"><div class="small"><b>${esc(u.name)}</b></div><button id="logoutTopBtn" class="btn btn-secondary btn-signout" type="button">Sign out</button></div></header>
+          <header class="topbar">
+            <div><h2 id="pageTitle">Home</h2><div class="tiny muted">${esc(state.me.school.name)}</div></div>
+            <div class="topbar-actions"><button id="notifBell" class="icon-btn" aria-label="Notifications">🔔<span id="topUnread" class="counter hidden">0</span></button><div class="topbar-user"><div class="small"><b>${esc(u.name)}</b></div><button id="logoutTopBtn" class="btn btn-secondary btn-signout">Sign out</button></div></div>
+          </header>
           <div id="content" class="content"></div>
         </main>
+        <nav class="mobile-nav">${bottom}</nav>
       </div>`;
     document.querySelectorAll('[data-nav]').forEach(btn => btn.addEventListener('click', () => navigate(btn.dataset.nav)));
-    byId('logoutBtn')?.addEventListener('click', () => logout());
-    byId('logoutTopBtn')?.addEventListener('click', () => logout());
+    byId('logoutBtn').onclick = () => logout(); byId('logoutTopBtn').onclick = () => logout(); byId('notifBell').onclick = () => navigate('notifications');
   }
 
   async function navigate(page) {
     state.page = page;
     document.querySelectorAll('[data-nav]').forEach(b => b.classList.toggle('active', b.dataset.nav === page));
-    const titles = { dashboard:'Dashboard', teacher:'My Result Sheets', classTeacher:'Class Results', hodAssignments:'Department Assignments', hodProgress:'Department Progress', admin:'School Setup', schoolProgress:'School Progress' };
-    const title = byId('pageTitle'); if (title) title.textContent = titles[page] || 'EduSend';
-    const content = byId('content');
-    content.innerHTML = '<div class="card">Loading…</div>';
+    const titles = { dashboard:'Home', teacher:'Enter Results', classTeacher:'Class Progress', reports:'Report Centre', notifications:'Notifications', hodAssignments:'Department Assignments', hodProgress:'Department Progress', escalations:'Escalations', admin:'School Setup', schoolProgress:'School Progress', audit:'Audit Trail' };
+    if (byId('pageTitle')) byId('pageTitle').textContent = titles[page] || 'EduSend';
+    const content = byId('content'); content.innerHTML = '<div class="loading-card">Loading…</div>';
     try {
-      if (page === 'dashboard') await renderDashboard(content);
-      else if (page === 'teacher') await renderTeacher(content);
-      else if (page === 'classTeacher') await renderClassTeacher(content);
-      else if (page === 'hodAssignments') await renderHodAssignments(content);
-      else if (page === 'hodProgress') await renderHodProgress(content);
-      else if (page === 'admin') await renderAdmin(content);
-      else if (page === 'schoolProgress') await renderSchoolProgress(content);
-    } catch (err) {
-      content.innerHTML = `<div class="alert alert-red"><b>Could not load this page.</b><br>${esc(err.message)}</div>`;
-    }
+      if (page==='dashboard') await renderDashboard(content);
+      else if (page==='teacher') await renderTeacher(content);
+      else if (page==='classTeacher') await renderClassTeacher(content);
+      else if (page==='reports') await renderReports(content);
+      else if (page==='notifications') await renderNotifications(content);
+      else if (page==='hodAssignments') await renderHodAssignments(content);
+      else if (page==='hodProgress') await renderHodProgress(content);
+      else if (page==='escalations') await renderEscalations(content);
+      else if (page==='admin') await renderAdmin(content);
+      else if (page==='schoolProgress') await renderSchoolProgress(content);
+      else if (page==='audit') await renderAudit(content);
+    } catch (err) { content.innerHTML = `<div class="alert alert-red"><b>Could not load this page.</b><br>${esc(err.message)}</div>`; }
   }
 
   async function renderDashboard(content) {
     const [rem, teacher] = await Promise.all([
-      api('/api/reminders'),
-      (state.me.user.roles || []).includes('TEACHER') ? api('/api/teacher/assignments') : Promise.resolve({ assignments: [] })
+      api('/api/reminders'), isRole('TEACHER') ? api('/api/teacher/assignments') : Promise.resolve({ assignments:[] })
     ]);
     const assignments = teacher.assignments || [];
-    const totalSheets = assignments.reduce((n,a) => n + (a.sheets?.length || 0), 0);
-    const submitted = assignments.reduce((n,a) => n + (a.sheets || []).filter(s => ['SUBMITTED','LOCKED'].includes(s.status)).length, 0);
-    const draft = assignments.reduce((n,a) => n + (a.sheets || []).filter(s => s.status === 'DRAFT').length, 0);
+    const sheets = assignments.flatMap(a => a.sheets || []);
+    const submitted = sheets.filter(s => ['SUBMITTED','LOCKED','CORRECTION_REQUESTED'].includes(s.status)).length;
+    const due = rem.reminders?.filter(r => ['OVERDUE','DUE_SOON'].includes(r.deadline.code)).length || 0;
     const classCount = state.me.classTeacherClasses?.length || 0;
+    const firstName = (state.me.user.name || '').replace(/^Mr\.?\s+|^Mrs\.?\s+|^Ms\.?\s+/i,'').split(' ')[0] || state.me.user.name;
     content.innerHTML = `
+      <section class="hero-card"><div><span class="eyebrow">EDUSEND V2.0</span><h1>Welcome, ${esc(firstName)}</h1><p>Enter results once. EduSend moves them to the right class teacher automatically.</p></div><div class="hero-orb">ES</div></section>
       ${deadlineBanner(rem.reminders)}
-      <div class="grid grid-4">
-        <div class="card"><div class="stat">${assignments.length}</div><div class="stat-label">Subject/class assignments</div></div>
-        <div class="card"><div class="stat">${submitted}/${totalSheets || 0}</div><div class="stat-label">Result sheets submitted</div></div>
-        <div class="card"><div class="stat">${draft}</div><div class="stat-label">Draft sheets</div></div>
-        <div class="card"><div class="stat">${classCount}</div><div class="stat-label">Classes where you are class teacher</div></div>
+      <div class="grid grid-4 stats-grid">
+        <div class="card stat-card"><div class="stat">${assignments.length}</div><div class="stat-label">Teaching allocations</div></div>
+        <div class="card stat-card"><div class="stat">${submitted}/${sheets.length || 0}</div><div class="stat-label">Sheets completed</div></div>
+        <div class="card stat-card"><div class="stat">${due}</div><div class="stat-label">Urgent deadlines</div></div>
+        <div class="card stat-card"><div class="stat">${classCount}</div><div class="stat-label">Class-teacher classes</div></div>
       </div>
-      <div class="grid grid-2" style="margin-top:16px">
-        <div class="card"><h3>Your access</h3><p class="small">${roleNames().map(esc).join(' • ')}</p><p class="small muted">Subject teachers only receive their assigned result-entry sheets. Class teachers receive submitted results for their own class. HODs manage subject/class assignments in their department.</p></div>
-        <div class="card"><h3>Current assessment deadlines</h3>${state.assessments.length ? state.assessments.map(a => `<div class="inline" style="justify-content:space-between;border-top:1px solid #edf0f5;padding:8px 0"><span>${esc(a.name)}</span><b class="small">${fmtDate(a.dueAt)}</b></div>`).join('') : '<div class="empty">No active assessment.</div>'}</div>
+      <div class="section-title space-top"><h3>Quick actions</h3></div>
+      <div class="action-grid">
+        ${isRole('TEACHER')?actionTile('✎','Enter results','Open your assigned class/subject sheets.','teacher'):''}
+        ${isClassTeacher()||isAdminOrHeadFront()?actionTile('▦','Class progress','See which subjects have arrived automatically.','classTeacher'):''}
+        ${isClassTeacher()||isAdminOrHeadFront()?actionTile('▤','Report centre','Generate, download and share pupil reports.','reports'):''}
+        ${isRole('HOD')?actionTile('⇄','Department assignments','Allocate teachers to class subjects.','hodAssignments'):''}
+        ${isRole('ADMIN')?actionTile('⚙','School setup','Manage staff, classes, subjects and deadlines.','admin'):''}
+        ${actionTile('🔔','Notifications',`${state.unread} unread notification${state.unread===1?'':'s'}.`,'notifications')}
       </div>`;
+    content.querySelectorAll('[data-action-nav]').forEach(b => b.onclick = () => navigate(b.dataset.actionNav));
+  }
+
+  function actionTile(icon, title, text, page) {
+    return `<button class="action-tile" data-action-nav="${page}"><span class="action-icon">${icon}</span><b>${esc(title)}</b><small>${esc(text)}</small><span class="arrow">→</span></button>`;
   }
 
   async function renderTeacher(content) {
-    const data = await api('/api/teacher/assignments');
-    const rows = [];
-    for (const a of data.assignments) {
-      for (const s of a.sheets) rows.push({ a, s });
-    }
+    const d = await api('/api/teacher/assignments');
+    const rows = d.assignments.flatMap(a => (a.sheets || []).map(s => ({ a, s })));
     content.innerHTML = `
-      <div class="section-title"><h3>Only your assigned subjects are shown</h3><span class="pill pill-blue">Subject privacy enforced by server</span></div>
-      ${rows.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Subject</th><th>Assessment</th><th>Deadline</th><th>Status</th><th>Last update</th><th></th></tr></thead><tbody>${rows.map(({a,s}) => `
-        <tr><td><b>${esc(a.className)}</b></td><td class="subject-cell">${esc(a.subjectName)}</td><td>${esc(s.assessment.name)}</td><td>${fmtDate(s.assessment.dueAt)}</td><td>${statusPill(s.status,s.deadline)}</td><td>${fmtDate(s.updatedAt)}</td><td><button class="action-link" data-open-sheet="${a.id}" data-assessment="${s.assessment.id}">Enter results →</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No subject/class assignment has been given to you yet.</div>'}`;
-    document.querySelectorAll('[data-open-sheet]').forEach(b => b.addEventListener('click', () => openResultSheet(b.dataset.openSheet, b.dataset.assessment)));
+      <div class="page-intro"><div><h3>Your result sheets</h3><p>Only classes and subjects assigned to you are visible.</p></div><span class="pill pill-blue">One-entry workflow</span></div>
+      ${rows.length ? `<div class="sheet-grid">${rows.map(({a,s}) => `
+        <article class="sheet-card">
+          <div class="sheet-card-top"><span class="class-chip">${esc(a.className)}</span>${statusPill(s.status,s.deadline)}</div>
+          <h3>${esc(a.subjectName)}</h3><p>${esc(s.assessment.name)}</p>
+          <div class="mini-metrics"><span><b>${s.entered}</b> entered</span><span><b>${s.pupilCount}</b> pupils</span></div>
+          <div class="deadline-row"><span>${esc(s.deadline.text)}</span><span>${fmtDate(s.deadline.dueAt)}</span></div>
+          <button class="btn ${['SUBMITTED','LOCKED'].includes(s.status)?'btn-secondary':'btn-primary'} full" data-open-sheet="${a.id}" data-assessment="${s.assessment.id}">${['SUBMITTED','LOCKED'].includes(s.status)?'View sheet':'Open & enter results'}</button>
+        </article>`).join('')}</div>` : '<div class="empty">No class/subject has been assigned to you yet.</div>'}`;
+    content.querySelectorAll('[data-open-sheet]').forEach(b => b.onclick = () => openResultSheet(b.dataset.openSheet, b.dataset.assessment));
   }
 
   async function openResultSheet(assignmentId, assessmentId) {
-    const data = await api(`/api/teacher/sheet?assignmentId=${encodeURIComponent(assignmentId)}&assessmentId=${encodeURIComponent(assessmentId)}`);
-    const { assignment, assessment, sheet, pupils } = data;
-    const rows = pupils.map((p,i) => `<tr><td>${i+1}</td><td><b>${esc(p.name)}</b><div class="tiny muted">${esc(p.sex || '')}</div></td><td>${esc(p.examNo || '—')}</td><td class="center"><input class="mark-input" type="number" min="0" max="100" step="0.1" data-mark="${p.id}" value="${sheet.marks[p.id] ?? ''}" placeholder="—"></td></tr>`).join('');
+    const d = await api(`/api/teacher/sheet?assignmentId=${encodeURIComponent(assignmentId)}&assessmentId=${encodeURIComponent(assessmentId)}`);
+    state.activeSheet = d;
+    const readOnly = ['SUBMITTED','LOCKED'].includes(d.sheet.status);
+    const rows = d.pupils.map((p,i) => {
+      const mark = d.sheet.marks[p.id] ?? '';
+      const st = d.sheet.markStates[p.id] || (mark!==''?'PRESENT':'PENDING');
+      return `<tr><td>${i+1}</td><td><b>${esc(p.name)}</b>${p.isRepeater?'<span class="repeater-tag">Repeater</span>':''}<div class="tiny muted">${esc(p.examNo || '')}</div></td><td class="center"><input class="mark-input" data-mark="${p.id}" type="number" min="0" max="100" step="0.1" value="${esc(mark)}" ${readOnly?'disabled':''}></td><td><select class="status-select" data-state="${p.id}" ${readOnly?'disabled':''}><option value="PENDING" ${st==='PENDING'?'selected':''}>Pending</option><option value="PRESENT" ${st==='PRESENT'?'selected':''}>Mark entered</option><option value="ABSENT" ${st==='ABSENT'?'selected':''}>Absent</option><option value="NOT_TAKING" ${st==='NOT_TAKING'?'selected':''}>Not taking</option></select></td></tr>`;
+    }).join('');
     showModal(`
-      <div class="modal-head"><div><b>${esc(assignment.className)} — ${esc(assignment.subjectName)}</b><div class="tiny muted">${esc(assessment.name)} • Due ${fmtDate(assessment.dueAt)}</div></div><button class="close" data-close>×</button></div>
+      <div class="modal-head"><div><b>${esc(d.assignment.className)} — ${esc(d.assignment.subjectName)}</b><div class="tiny muted">${esc(d.assessment.name)} • ${esc(d.sheet.deadline.text)} • ${fmtDate(d.sheet.deadline.dueAt)}</div></div><button class="close" data-close>×</button></div>
       <div class="modal-body">
-        <div class="alert alert-blue small"><b>Privacy rule:</b> You can enter only ${esc(assignment.subjectName)} for ${esc(assignment.className)}. Other subject marks are not sent to this screen.</div>
-        <div class="inline" style="justify-content:space-between;margin-bottom:10px"><div>Status: ${statusPill(sheet.status)}</div><div class="small muted">Blank means no mark entered. Zero is a valid mark.</div></div>
-        <div class="table-wrap"><table class="table"><thead><tr><th>#</th><th>Pupil</th><th>Exam No.</th><th class="center">Mark (%)</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <div class="workflow-strip"><span>1. Enter mark</span><span>2. Mark absent/not taking where needed</span><span>3. Finish & Submit</span></div>
+        ${readOnly?'<div class="alert alert-green"><b>This sheet is already submitted.</b> Marks are read-only unless a correction is requested.</div>':'<div class="alert alert-blue"><b>Autosave is on.</b> Pending pupils must be resolved before Finish & Submit.</div>'}
+        <div id="autosaveStatus" class="tiny muted" style="margin-bottom:8px">${readOnly?'Submitted '+fmtDate(d.sheet.submittedAt):'Ready'}</div>
+        <div class="table-wrap"><table class="table result-entry"><thead><tr><th>#</th><th>Pupil</th><th class="center">Mark %</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
       </div>
-      <div class="modal-foot"><button class="btn btn-secondary" data-close>Cancel</button><button id="saveDraft" class="btn btn-secondary" ${sheet.status==='LOCKED'?'disabled':''}>Save Draft</button><button id="submitResults" class="btn btn-green" ${sheet.status==='LOCKED'?'disabled':''}>Submit Results</button></div>`);
-    byId('saveDraft')?.addEventListener('click', () => saveSheet(data, 'draft'));
-    byId('submitResults')?.addEventListener('click', () => saveSheet(data, 'submit'));
+      <div class="modal-foot"><button class="btn btn-secondary" data-close>Close</button>${readOnly?'':`<button id="saveDraft" class="btn btn-secondary">Save Draft</button><button id="submitResults" class="btn btn-green">Finish & Submit</button>`}</div>`);
+    if (!readOnly) {
+      document.querySelectorAll('[data-mark],[data-state]').forEach(el => el.addEventListener('input', () => scheduleAutosave()));
+      document.querySelectorAll('[data-state]').forEach(el => el.addEventListener('change', () => { const mark=document.querySelector(`[data-mark=\"${el.dataset.state}\"]`); if(mark && ['ABSENT','NOT_TAKING','PENDING'].includes(el.value)) mark.value=''; scheduleAutosave(); }));
+      document.querySelectorAll('[data-mark]').forEach(el => el.addEventListener('input', () => {
+        if (el.value !== '') { const st = document.querySelector(`[data-state="${el.dataset.mark}"]`); if (st) st.value = 'PRESENT'; }
+      }));
+      byId('saveDraft').onclick = () => saveActiveSheet('draft', false);
+      byId('submitResults').onclick = () => saveActiveSheet('submit', false);
+    }
   }
 
-  async function saveSheet(data, action) {
-    const marks = [...document.querySelectorAll('[data-mark]')].map(el => ({ pupilId: el.dataset.mark, mark: el.value === '' ? null : Number(el.value) }));
-    if (action === 'submit' && !confirm('Submit these results to the class teacher? They will become visible in the class result dashboard immediately.')) return;
+  function collectSheetRows() {
+    return [...document.querySelectorAll('[data-mark]')].map(el => ({ pupilId:el.dataset.mark, mark:el.value===''?null:Number(el.value), state:document.querySelector(`[data-state="${el.dataset.mark}"]`)?.value || 'PENDING' }));
+  }
+
+  function scheduleAutosave() {
+    clearTimeout(state.autosaveTimer); const s = byId('autosaveStatus'); if (s) s.textContent = 'Unsaved changes…';
+    state.autosaveTimer = setTimeout(() => saveActiveSheet('draft', true), 1200);
+  }
+
+  async function saveActiveSheet(action, silent) {
+    if (!state.activeSheet) return;
+    clearTimeout(state.autosaveTimer);
     try {
-      const result = await api('/api/teacher/sheet', { method:'PUT', body:{ assignmentId:data.assignment.id, assessmentId:data.assessment.id, marks, action } });
-      toast(action === 'submit' ? 'Results submitted to the class teacher' : 'Draft saved');
-      closeModal();
-      await navigate('teacher');
-    } catch (err) { toast(err.message, true); }
+      const result = await api('/api/teacher/sheet', { method:'PUT', body:{ assignmentId:state.activeSheet.assignment.id, assessmentId:state.activeSheet.assessment.id, rows:collectSheetRows(), action } });
+      const s = byId('autosaveStatus'); if (s) s.textContent = action==='submit' ? 'Submitted successfully' : `Saved ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
+      if (action === 'submit') { toast('Results submitted. The class teacher has been notified.'); closeModal(); await navigate('teacher'); }
+      else if (!silent) toast('Draft saved');
+    } catch (err) { if (!silent) toast(err.message, true); else { const s=byId('autosaveStatus'); if(s)s.textContent=`Autosave failed: ${err.message}`; } }
   }
 
   async function renderClassTeacher(content) {
-    const classesData = await api('/api/class-teacher/classes');
-    const classes = classesData.classes || [];
-    if (!classes.length) { content.innerHTML = '<div class="empty">You have not been assigned as class teacher.</div>'; return; }
-    const assessmentId = state.assessments[0]?.id || '';
-    content.innerHTML = `
-      <div class="toolbar" style="margin-bottom:14px"><label style="margin:0">Class</label><select id="classSelect" style="width:auto">${classes.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><label style="margin:0">Assessment</label><select id="assessmentSelect" style="width:auto">${state.assessments.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select><button id="refreshClass" class="btn btn-secondary">Refresh</button></div>
-      <div id="classOverview"></div>`;
+    const d = await api('/api/class-teacher/classes'); const classes = d.classes || [];
+    if (!classes.length) { content.innerHTML = '<div class="empty">No class is assigned to you as class teacher.</div>'; return; }
+    content.innerHTML = `<div class="toolbar premium-toolbar"><select id="classSelect">${classes.map(c=>`<option value="${c.id}">${esc(c.name)} • ${esc(c.gradingSystem)}</option>`).join('')}</select><select id="assessmentSelect">${state.assessments.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select><button id="refreshClass" class="btn btn-secondary">Refresh</button><button id="goReports" class="btn btn-primary">Open Report Centre</button></div><div id="classOverview"></div>`;
     const load = () => loadClassOverview(byId('classSelect').value, byId('assessmentSelect').value);
-    byId('classSelect').addEventListener('change', load); byId('assessmentSelect').addEventListener('change', load); byId('refreshClass').addEventListener('click', load);
-    await load();
+    byId('classSelect').onchange = load; byId('assessmentSelect').onchange = load; byId('refreshClass').onclick = load; byId('goReports').onclick = () => navigate('reports'); await load();
   }
 
   async function loadClassOverview(classId, assessmentId) {
-    const holder = byId('classOverview'); if (!holder) return;
-    holder.innerHTML = '<div class="card">Loading class results…</div>';
+    const h = byId('classOverview'); if (!h) return; h.innerHTML = '<div class="loading-card">Loading class results…</div>';
     const d = await api(`/api/class-teacher/overview?classId=${encodeURIComponent(classId)}&assessmentId=${encodeURIComponent(assessmentId)}`);
-    const submitted = d.subjects.filter(s => ['SUBMITTED','LOCKED'].includes(s.status)).length;
-    const pct = d.subjects.length ? Math.round(submitted / d.subjects.length * 100) : 0;
-    const subjectCards = d.subjects.map(s => `<div class="card"><div class="inline" style="justify-content:space-between"><b>${esc(s.subjectName)}</b>${statusPill(s.status,s.deadline)}</div><div class="small muted" style="margin-top:6px">${esc(s.teacherName || 'Unassigned')}</div><div class="tiny muted">${s.submittedAt ? 'Submitted '+fmtDate(s.submittedAt) : s.status==='DRAFT' ? 'Teacher is still entering marks' : 'Waiting for subject teacher'}</div></div>`).join('');
-    const headCells = d.subjects.map(s => `<th class="center">${esc(s.subjectName)}</th>`).join('');
-    const rows = d.pupils.map((p,i) => `<tr><td>${i+1}</td><td><b>${esc(p.name)}</b><div class="tiny muted">${esc(p.parentPrimary || '')}</div></td>${d.subjects.map(s => `<td class="center">${p.marks[s.subjectId] ?? '—'}</td>`).join('')}</tr>`).join('');
+    const r = d.reportReadiness; const pct = r.totalSubjects ? Math.round(r.submittedSubjects/r.totalSubjects*100) : 0;
+    const subjects = d.subjects.map(s => `<article class="subject-progress-card"><div><b>${esc(s.subjectName)}</b><small>${esc(s.teacherName||'Unassigned')}</small></div>${statusPill(s.status,s.deadline)}<div class="subject-actions">${!['SUBMITTED','LOCKED','CORRECTION_REQUESTED'].includes(s.status)?`<button class="action-link" data-escalate="${s.assignmentId}">Escalate</button>`:`<button class="action-link" data-correct="${s.assignmentId}">Request correction</button>`}</div></article>`).join('');
+    const heads = d.subjects.map(s => `<th class="center">${esc(s.subjectName)}</th>`).join('');
+    const rows = d.pupils.map((p,i) => `<tr><td>${i+1}</td><td><b>${esc(p.name)}</b>${p.isRepeater?'<span class="repeater-tag">R</span>':''}<div class="tiny muted">${esc(p.parentPrimary||'No parent number')}</div></td>${d.subjects.map(s=>{const x=p.results[s.subjectId]||{};return `<td class="center">${x.state==='NOT_TAKING'?'N/T':x.state==='ABSENT'?'ABS':x.mark??'—'}</td>`}).join('')}</tr>`).join('');
+    h.innerHTML = `
+      <div class="readiness-banner ${r.finalReady?'ready':r.provisionalAllowed?'provisional':'blocked'}"><div><span class="eyebrow">REPORT READINESS</span><h3>${r.finalReady?'Reports are complete':r.provisionalAllowed?'Provisional reports authorized':'Waiting for missing subjects'}</h3><p>${r.submittedSubjects}/${r.totalSubjects} subjects received${r.missingSubjects.length?` • Missing: ${r.missingSubjects.map(x=>x.subjectName).join(', ')}`:''}</p></div><div class="progress-ring">${pct}%</div></div>
+      <div class="grid grid-3 space-top"><div class="card"><div class="stat">${r.submittedSubjects}/${r.totalSubjects}</div><div class="stat-label">Subjects received</div></div><div class="card"><div class="stat">${d.pupils.length}</div><div class="stat-label">Pupils</div></div><div class="card"><div class="stat">${d.class.gradingSystem}</div><div class="stat-label">Grading profile</div></div></div>
+      <div class="section-title space-top"><h3>Subject submission flow</h3><span class="tiny muted">Marks appear automatically after Finish & Submit.</span></div>
+      <div class="subject-progress-grid">${subjects}</div>
+      <div class="section-title space-top"><h3>Master mark schedule</h3><span class="pill pill-blue">No retyping</span></div>
+      <div class="table-wrap"><table class="table"><thead><tr><th>#</th><th>Pupil / Parent</th>${heads}</tr></thead><tbody>${rows}</tbody></table></div>`;
+    h.querySelectorAll('[data-escalate]').forEach(b => b.onclick = () => escalateMissing(b.dataset.escalate, assessmentId));
+    h.querySelectorAll('[data-correct]').forEach(b => b.onclick = () => requestCorrection(b.dataset.correct, assessmentId));
+  }
+
+  async function escalateMissing(assignmentId, assessmentId) {
+    const note = prompt('Optional note to the HOD/Administration:', 'Subject result is still outstanding and report preparation is affected.');
+    if (note === null) return;
+    try { await api('/api/escalations', { method:'POST', body:{ assignmentId, assessmentId, note } }); toast('Escalated to HOD and Administration'); if (state.page==='classTeacher') await loadClassOverview(byId('classSelect').value, byId('assessmentSelect').value); }
+    catch (err) { toast(err.message, true); }
+  }
+
+  async function requestCorrection(assignmentId, assessmentId) {
+    const note = prompt('What needs correction?'); if (note === null) return;
+    try { await api('/api/class-teacher/request-correction', { method:'POST', body:{ assignmentId, assessmentId, note } }); toast('Correction request sent to subject teacher'); if (state.page==='classTeacher') await loadClassOverview(byId('classSelect').value, byId('assessmentSelect').value); }
+    catch (err) { toast(err.message, true); }
+  }
+
+  async function renderReports(content) {
+    const d = await api('/api/class-teacher/classes'); const classes = d.classes || [];
+    if (!classes.length) { content.innerHTML = '<div class="empty">No class available for report generation.</div>'; return; }
+    content.innerHTML = `<div class="toolbar premium-toolbar"><select id="reportClass">${classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><select id="reportAssessment">${state.assessments.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select><button id="loadReports" class="btn btn-primary">Load reports</button></div><div id="reportBody"></div>`;
+    const load = () => loadReportCentre(byId('reportClass').value, byId('reportAssessment').value);
+    byId('loadReports').onclick = load; byId('reportClass').onchange = load; byId('reportAssessment').onchange = load; await load();
+  }
+
+  async function loadReportCentre(classId, assessmentId) {
+    const holder = byId('reportBody'); holder.innerHTML = '<div class="loading-card">Preparing report centre…</div>';
+    const [d, hist] = await Promise.all([
+      api(`/api/class-teacher/overview?classId=${encodeURIComponent(classId)}&assessmentId=${encodeURIComponent(assessmentId)}`),
+      api(`/api/class-teacher/report-history?classId=${encodeURIComponent(classId)}&assessmentId=${encodeURIComponent(assessmentId)}`)
+    ]);
+    const sentSet = new Set((hist.rows||[]).map(x=>x.pupilId)); const r=d.reportReadiness;
     holder.innerHTML = `
-      <div class="grid grid-3" style="margin-bottom:16px"><div class="card"><div class="stat">${submitted}/${d.subjects.length}</div><div class="stat-label">Subjects received</div></div><div class="card"><div class="stat">${pct}%</div><div class="stat-label">Class result completion</div><div class="progressbar" style="margin-top:9px"><span style="width:${pct}%"></span></div></div><div class="card"><div class="stat">${d.pupils.length}</div><div class="stat-label">Pupils in ${esc(d.class.name)}</div></div></div>
-      <div class="section-title"><h3>Subject submissions</h3><span class="tiny muted">Updates arrive automatically after a subject teacher submits.</span></div>
-      <div class="grid grid-4" style="margin-bottom:16px">${subjectCards}</div>
-      <div class="section-title"><h3>Combined class results</h3><span class="pill pill-blue">Submitted subjects only</span></div>
-      <div class="table-wrap"><table class="table"><thead><tr><th>#</th><th>Pupil / Parent</th>${headCells}</tr></thead><tbody>${rows}</tbody></table></div>`;
+      <div class="readiness-banner ${r.finalReady?'ready':r.provisionalAllowed?'provisional':'blocked'}"><div><span class="eyebrow">${r.finalReady?'FINAL REPORTS':'REPORT CONTROL'}</span><h3>${r.finalReady?'Ready to generate and send':r.provisionalAllowed?'Provisional release approved':'Reports are blocked'}</h3><p>${r.finalReady?'All required subjects are in.':r.provisionalAllowed?'Missing subjects will show Pending and final aggregate/position is withheld.':`Missing: ${r.missingSubjects.map(x=>x.subjectName).join(', ') || 'No subject assignments'}`}</p></div><button id="downloadAll" class="btn btn-gold" ${r.canSend?'':'disabled'}>Download class PDF</button></div>
+      <div class="report-list">${d.pupils.map(p=>`<article class="pupil-report-card"><div class="pupil-avatar">${esc((p.name||'?')[0])}</div><div class="pupil-main"><b>${esc(p.name)}</b><small>${esc(p.examNo||'No exam number')} ${p.isRepeater?'• Repeater':''}</small><span>${esc(p.parentPrimary||'No parent number')}</span></div><div class="report-status">${sentSet.has(p.id)?'<span class="pill pill-green">Sent</span>':'<span class="pill pill-grey">Not sent</span>'}</div><div class="report-actions"><button class="btn btn-secondary" data-preview="${p.id}">Preview</button><button class="btn btn-secondary" data-pdf="${p.id}" ${r.canSend?'':'disabled'}>PDF</button><button class="btn btn-primary" data-share="${p.id}" ${r.canSend?'':'disabled'}>Share</button></div></article>`).join('')}</div>`;
+    holder.querySelectorAll('[data-preview]').forEach(b=>b.onclick=()=>previewReport(d,b.dataset.preview));
+    holder.querySelectorAll('[data-pdf]').forEach(b=>b.onclick=()=>downloadReport(d,b.dataset.pdf));
+    holder.querySelectorAll('[data-share]').forEach(b=>b.onclick=()=>shareReport(d,b.dataset.share));
+    byId('downloadAll').onclick = () => downloadAllReports(d);
+  }
+
+  function gradeLegacy(mark) { const n=Number(mark); return n>=75?1:n>=70?2:n>=65?3:n>=60?4:n>=55?5:n>=50?6:n>=45?7:n>=40?8:9; }
+  function legacyRemark(g) { return g===1?'EXCELLENT KEEP IT UP':g===2?'EXCELLENT':g<=4?'VERY GOOD':g<=6?'GOOD':g<=8?'FAIR':'FAIL'; }
+  function gradeCBC(mark) { const n=Number(mark); return n>=70?1:n>=60?2:n>=50?3:n>=40?4:5; }
+  function cbcRemark(g) { return ['','OUTSTANDING','ADVANCED','BASIC','SATISFACTORY','UNSATISFACTORY'][g]; }
+
+  function pupilReportModel(d, pupil) {
+    const rows = d.subjects.map(s => { const r=pupil.results[s.subjectId]||{mark:null,state:'PENDING'}; const has=r.mark!==null && r.mark!==undefined && r.mark!=='' && Number.isFinite(Number(r.mark)); const grade=has?(d.class.gradingSystem==='CBC'?gradeCBC(r.mark):gradeLegacy(r.mark)):null; return { subject:s.subjectName, mark:has?Number(r.mark):null, state:r.state, grade, remark:grade?(d.class.gradingSystem==='CBC'?cbcRemark(grade):legacyRemark(grade)):r.state==='ABSENT'?'ABSENT':r.state==='NOT_TAKING'?'NOT TAKING':'PENDING' }; });
+    const numeric = rows.filter(x=>x.mark!==null && x.state!=='NOT_TAKING');
+    let summary = {};
+    const completeForOverall = rows.every(x => x.state === 'PRESENT' || x.state === 'NOT_TAKING');
+    if (d.class.gradingSystem==='LEGACY' && d.reportReadiness.finalReady && completeForOverall && numeric.length>=6) {
+      const best6 = [...numeric].sort((a,b)=>b.mark-a.mark).slice(0,6); const points = best6.reduce((n,x)=>n+x.grade,0); const total=best6.reduce((n,x)=>n+x.mark,0);
+      const totals = d.pupils.map(q => {
+        const qr=d.subjects.map(s=>{const z=q.results[s.subjectId]||{mark:null,state:'PENDING'};const ok=z.mark!==null&&z.mark!==undefined&&z.mark!==''&&Number.isFinite(Number(z.mark));return {mark:ok?Number(z.mark):null,state:z.state};});
+        const qComplete=qr.every(x=>x.state==='PRESENT'||x.state==='NOT_TAKING'); const nums=qr.filter(x=>x.mark!==null&&x.state!=='NOT_TAKING').map(x=>x.mark).sort((a,b)=>b-a).slice(0,6);
+        return qComplete&&nums.length>=6?{id:q.id,total:nums.reduce((a,b)=>a+b,0)}:null;
+      }).filter(Boolean).sort((a,b)=>b.total-a.total);
+      let rank=null; let last=null; let shown=0; for(let i=0;i<totals.length;i++){if(totals[i].total!==last){shown=i+1;last=totals[i].total}if(totals[i].id===pupil.id){rank=shown;break}}
+      summary = { best6Total:total, points, division:points<=12?'I':points<=17?'II':points<=24?'III':points<=35?'IV':'FAIL', position:rank };
+    } else if (d.class.gradingSystem==='CBC' && completeForOverall && numeric.length) {
+      summary = { average:Math.round(numeric.reduce((n,x)=>n+x.mark,0)/numeric.length*10)/10 };
+    }
+    return { rows, summary };
+  }
+
+  function teacherComment(d,pupil,model) {
+    const entered=model.rows.filter(x=>x.mark!==null).sort((a,b)=>b.mark-a.mark); if(!entered.length)return 'Results are still incomplete. Please continue supporting the learner as the remaining subject results are being finalized.';
+    const best=entered[0], weak=entered[entered.length-1];
+    if(d.reportReadiness.provisional)return `This is a provisional report because some subject results are still pending. ${pupil.name.split(' ')[0]} performed strongest in ${best.subject} (${best.mark}%) and should continue working consistently, especially in ${weak.subject} (${weak.mark}%). Final aggregate and position will be confirmed when all required results are available.`;
+    if(d.class.gradingSystem==='CBC') return `${pupil.name.split(' ')[0]} has shown ${best.remark.toLowerCase()} performance in ${best.subject}. Continued practice is encouraged, with extra attention to ${weak.subject}. The learner should review corrections, practise regularly and ask for help where concepts are not yet secure.`;
+    return `${pupil.name.split(' ')[0]} performed strongest in ${best.subject} (${best.mark}%) and should maintain that effort. More focused revision is needed in ${weak.subject} (${weak.mark}%). Regular practice, correction of mistakes and consistent study will help improve the overall result.`;
+  }
+
+  function previewReport(d, pupilId) {
+    const p=d.pupils.find(x=>x.id===pupilId); if(!p)return; const m=pupilReportModel(d,p);
+    showModal(`<div class="modal-head"><div><b>Report Preview — ${esc(p.name)}</b><div class="tiny muted">${esc(d.class.name)} • ${esc(d.assessment.name)}</div></div><button class="close" data-close>×</button></div><div class="modal-body"><div class="report-preview ${d.reportReadiness.provisional?'is-provisional':''}"><div class="rp-head"><div>REPUBLIC OF ZAMBIA<br><b>MINISTRY OF EDUCATION</b></div><h2>${esc(state.me.school.name)}</h2><h3>PUPIL'S PROGRESS REPORT</h3>${d.reportReadiness.provisional?'<div class="provisional-stamp">PROVISIONAL REPORT</div>':''}</div><div class="rp-meta"><span><b>Name:</b> ${esc(p.name)}</span><span><b>Class:</b> ${esc(d.class.name)}</span><span><b>Assessment:</b> ${esc(d.assessment.name)}</span><span><b>Exam No:</b> ${esc(p.examNo||'—')}</span></div><table class="rp-table"><thead><tr><th>Subject</th><th>Mark</th><th>Grade</th><th>Remark</th></tr></thead><tbody>${m.rows.map(x=>`<tr><td>${esc(x.subject)}</td><td>${x.mark??'—'}</td><td>${x.grade??'—'}</td><td>${esc(x.remark)}</td></tr>`).join('')}</tbody></table><div class="rp-summary">${d.class.gradingSystem==='CBC'?`Average: <b>${m.summary.average??'—'}%</b>`:`Best 6 Total: <b>${m.summary.best6Total??'—'}</b> • Points: <b>${m.summary.points??'—'}</b> • Division: <b>${m.summary.division??'—'}</b> • Position: <b>${m.summary.position??'—'}</b>`}</div><div class="rp-comment"><b>Class Teacher's Comment:</b><p>${esc(teacherComment(d,p,m))}</p></div><div class="rp-footer">Class Teacher: ${esc(d.classTeacher?.name||state.me.user.name)} ${d.classTeacher?.phone?`• ${esc(d.classTeacher.phone)}`:''}</div></div></div><div class="modal-foot"><button class="btn btn-secondary" data-close>Close</button><button class="btn btn-primary" id="previewPdf">Download PDF</button></div>`);
+    byId('previewPdf').onclick = () => downloadReport(d,p.id);
+  }
+
+  async function ensurePdf() {
+    if (window.jspdf?.jsPDF) return window.jspdf.jsPDF;
+    await new Promise((resolve,reject)=>{ const s=document.createElement('script'); s.src='https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'; s.onload=resolve; s.onerror=()=>reject(new Error('PDF library could not load. Check your internet connection.')); document.head.appendChild(s); });
+    return window.jspdf.jsPDF;
+  }
+
+  function drawReportPdf(doc,d,p,pageNo=1) {
+    const model=pupilReportModel(d,p); const W=210; const blue=[11,47,107], gold=[241,182,0];
+    doc.setDrawColor(...blue); doc.setLineWidth(.7); doc.rect(8,8,194,281); doc.setFillColor(...blue); doc.rect(8,8,194,8,'F'); doc.setFillColor(...gold); doc.rect(8,16,194,2,'F');
+    doc.setTextColor(0); doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.text('REPUBLIC OF ZAMBIA',W/2,25,{align:'center'}); doc.text('MINISTRY OF EDUCATION',W/2,30,{align:'center'}); doc.setTextColor(...blue); doc.setFontSize(14); doc.text(String(state.me.school.name||'').toUpperCase(),W/2,37,{align:'center'}); doc.setTextColor(0); doc.setFontSize(11); doc.text("PUPIL'S PROGRESS REPORT",W/2,44,{align:'center'});
+    if(d.reportReadiness.provisional){doc.setTextColor(185,40,40);doc.setFontSize(10);doc.text('PROVISIONAL REPORT — SOME SUBJECT RESULTS PENDING',W/2,50,{align:'center'});}
+    let y=d.reportReadiness.provisional?57:52; doc.setTextColor(0);doc.setFontSize(9);doc.setFont('helvetica','normal');
+    const meta=[`NAME: ${p.name}`,`CLASS: ${d.class.name}`,`ASSESSMENT: ${d.assessment.name}`,`EXAM NO: ${p.examNo||'—'}`]; meta.forEach((t,i)=>doc.text(t,14+i%2*96,y+Math.floor(i/2)*6)); y+=16;
+    const col=[14,82,112,136,196]; doc.setFillColor(239,245,255);doc.rect(14,y,182,8,'F');doc.setFont('helvetica','bold');['SUBJECT','MARK','GRADE','REMARK'].forEach((t,i)=>doc.text(t,[16,86,116,140][i],y+5.5)); y+=8; doc.setFont('helvetica','normal');
+    model.rows.forEach(r=>{doc.setDrawColor(220);doc.rect(14,y,182,7);doc.text(String(r.subject).slice(0,30),16,y+4.8);doc.text(r.mark===null?'—':String(r.mark),88,y+4.8);doc.text(r.grade===null?'—':String(r.grade),118,y+4.8);doc.text(String(r.remark).slice(0,28),140,y+4.8);y+=7;});
+    y+=5; doc.setFont('helvetica','bold'); if(d.class.gradingSystem==='CBC') doc.text(`Average: ${model.summary.average??'—'}%`,14,y); else doc.text(`Best 6 Total: ${model.summary.best6Total??'—'}    Points: ${model.summary.points??'—'}    Division: ${model.summary.division??'—'}    Position: ${model.summary.position??'—'}`,14,y); y+=8;
+    doc.setFont('helvetica','bold');doc.text("Class Teacher's Comment:",14,y);y+=5;doc.setFont('helvetica','normal');const comment=teacherComment(d,p,model);const lines=doc.splitTextToSize(comment,180);doc.text(lines,14,y);y+=lines.length*4.5+6;
+    if(d.reportReadiness.provisional){doc.setTextColor(185,40,40);doc.setFont('helvetica','bold');doc.text('Missing subject results are shown as Pending. Final aggregate/division/position is withheld until completion.',14,y);y+=7;doc.setTextColor(0);}
+    doc.setDrawColor(...gold);doc.line(14,270,196,270);doc.setFontSize(8);doc.setTextColor(...blue);doc.text(`Class Teacher: ${d.classTeacher?.name||state.me.user.name}${d.classTeacher?.phone?` • ${d.classTeacher.phone}`:''}`,14,276);doc.text(`EduSend • Page ${pageNo}`,196,276,{align:'right'});doc.setTextColor(0);
+  }
+
+  async function buildReportDoc(d,pupils) {
+    const JsPDF=await ensurePdf(); const doc=new JsPDF({orientation:'portrait',unit:'mm',format:'a4'}); pupils.forEach((p,i)=>{if(i)doc.addPage();drawReportPdf(doc,d,p,i+1)}); return doc;
+  }
+
+  async function downloadReport(d,pupilId) { try { const p=d.pupils.find(x=>x.id===pupilId); const doc=await buildReportDoc(d,[p]); doc.save(`${d.class.name}_${p.name.replace(/\s+/g,'_')}_${d.assessment.name.replace(/\s+/g,'_')}.pdf`); } catch(err){toast(err.message,true);} }
+  async function downloadAllReports(d) { try { const doc=await buildReportDoc(d,d.pupils); doc.save(`${d.class.name}_${d.assessment.name.replace(/\s+/g,'_')}_Reports.pdf`); } catch(err){toast(err.message,true);} }
+
+  function normalizePhone(x) { const d=String(x||'').replace(/\D/g,''); if(d.startsWith('260'))return d;if(d.startsWith('0'))return '260'+d.slice(1);return d; }
+  async function shareReport(d,pupilId) {
+    const p=d.pupils.find(x=>x.id===pupilId); if(!p)return;
+    try {
+      const doc=await buildReportDoc(d,[p]); const blob=doc.output('blob'); const file=new File([blob],`${d.class.name}_${p.name.replace(/\s+/g,'_')}.pdf`,{type:'application/pdf'}); const text=`${state.me.school.name}\n${d.assessment.name}\nPupil: ${p.name}\nClass: ${d.class.name}${d.reportReadiness.provisional?'\nPROVISIONAL REPORT — some results pending':''}`;
+      let channel='DOWNLOAD';
+      if(navigator.share && (!navigator.canShare || navigator.canShare({files:[file]}))){await navigator.share({files:[file],title:'EduSend pupil report',text});channel='SHARE';}
+      else {doc.save(file.name);const phone=normalizePhone(p.parentPrimary);if(phone)window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text+'\nPDF has been generated for sharing.')}`,'_blank');}
+      await api('/api/class-teacher/report-sent',{method:'POST',body:{classId:d.class.id,assessmentId:d.assessment.id,pupilId:p.id,parentNumber:p.parentPrimary,channel}}).catch(()=>{}); toast('Report prepared for the parent'); await loadReportCentre(d.class.id,d.assessment.id);
+    } catch(err){ if(err.name!=='AbortError')toast(err.message,true); }
+  }
+
+  async function refreshNotifications() {
+    if(!state.token)return; try { const d=await api('/api/notifications'); state.unread=d.unread||0; updateUnreadBadges(); } catch {}
+  }
+  function updateUnreadBadges(){[['topUnread',true],['sideUnread',false]].forEach(([id])=>{const e=byId(id);if(e){e.textContent=state.unread;e.classList.toggle('hidden',!state.unread)}});const m=byId('mobileUnread');if(m)m.classList.toggle('hidden',!state.unread);}
+  async function renderNotifications(content) {
+    const d=await api('/api/notifications');
+    content.innerHTML=`<div class="page-intro"><div><h3>Notifications</h3><p>Result submissions, corrections, assignments and escalations appear here.</p></div><button id="markRead" class="btn btn-secondary">Mark all read</button></div><div class="notification-list">${d.notifications.length?d.notifications.map(n=>`<article class="notification-item ${n.readAt?'':'unread'}"><span class="notification-dot"></span><div><b>${esc(n.title)}</b><p>${esc(n.message)}</p><small>${fmtDate(n.createdAt)}</small></div></article>`).join(''):'<div class="empty">No notifications yet.</div>'}</div>`;
+    byId('markRead').onclick=async()=>{await api('/api/notifications/read',{method:'POST',body:{}});state.unread=0;updateUnreadBadges();await renderNotifications(content)};
   }
 
   async function renderHodAssignments(content) {
-    const d = await api('/api/hod/assignments');
-    content.innerHTML = `
-      <div class="alert alert-blue"><b>${esc(d.department.name)} HOD</b> — assign teachers only to subjects belonging to your department.</div>
-      <div class="grid grid-2">
-        <div class="card"><h3>Assign teacher to class and subject</h3><form id="hodAssignForm" class="stack">
-          <div><label>Class</label><select id="hodClass">${d.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div>
-          <div><label>Subject</label><select id="hodSubject">${d.subjects.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
-          <div><label>Teacher</label><select id="hodTeacher">${d.teachers.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select></div>
-          <button class="btn btn-primary" type="submit">Save assignment</button>
-        </form></div>
-        <div class="card"><h3>Department rules</h3><p class="small muted">Once assigned, the teacher sees only that class/subject result sheet. The HOD monitors completion, while class teachers receive submitted results for their own classes.</p></div>
-      </div>
-      <div class="card" style="margin-top:16px"><h3>Current department assignments</h3><div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Subject</th><th>Teacher</th></tr></thead><tbody>${d.assignments.map(a=>`<tr><td>${esc(a.className)}</td><td><b>${esc(a.subjectName)}</b></td><td>${esc(a.teacherName)}</td></tr>`).join('')}</tbody></table></div></div>`;
-    byId('hodAssignForm').addEventListener('submit', async e => {
-      e.preventDefault();
-      try {
-        await api('/api/hod/assign', { method:'POST', body:{ classId:byId('hodClass').value, subjectId:byId('hodSubject').value, teacherUserId:byId('hodTeacher').value } });
-        toast('Teacher assignment saved'); await renderHodAssignments(content);
-      } catch(err){ toast(err.message,true); }
-    });
+    const d=await api('/api/hod/assignments');
+    content.innerHTML=`<div class="page-intro"><div><h3>${esc(d.department.name)}</h3><p>Assign each class subject to the teacher who will enter the marks once.</p></div></div><div class="grid grid-2"><div class="card"><h3>Assign teacher</h3><form id="hodAssignForm" class="stack"><div><label>Class</label><select id="hodClass">${d.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div><label>Subject</label><select id="hodSubject">${d.subjects.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div><div><label>Teacher</label><select id="hodTeacher">${d.teachers.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select></div><button class="btn btn-primary">Save assignment</button></form></div><div class="card"><h3>How it works</h3><p class="muted">Once assigned, the teacher sees only that class and subject. When Finish & Submit is pressed, the class teacher receives the marks automatically.</p></div></div><div class="card space-top"><h3>Current assignments</h3><div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Subject</th><th>Teacher</th></tr></thead><tbody>${d.assignments.map(a=>`<tr><td>${esc(a.className)}</td><td><b>${esc(a.subjectName)}</b></td><td>${esc(a.teacherName)}</td></tr>`).join('')}</tbody></table></div></div>`;
+    byId('hodAssignForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/hod/assign',{method:'POST',body:{classId:byId('hodClass').value,subjectId:byId('hodSubject').value,teacherUserId:byId('hodTeacher').value}});toast('Assignment saved');await renderHodAssignments(content)}catch(err){toast(err.message,true)}};
   }
 
   async function renderHodProgress(content) {
-    if (!state.assessments.length) { content.innerHTML='<div class="empty">No assessment.</div>'; return; }
-    content.innerHTML = `<div class="toolbar" style="margin-bottom:14px"><label style="margin:0">Assessment</label><select id="hodAssess" style="width:auto">${state.assessments.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></div><div id="hodProgressBody"></div>`;
-    const load = async () => {
-      const d = await api(`/api/hod/progress?assessmentId=${encodeURIComponent(byId('hodAssess').value)}`);
-      const done = d.rows.filter(r=>['SUBMITTED','LOCKED'].includes(r.status)).length;
-      const overdue = d.rows.filter(r=>r.deadline.code==='OVERDUE').length;
-      byId('hodProgressBody').innerHTML = `<div class="grid grid-3" style="margin-bottom:16px"><div class="card"><div class="stat">${done}/${d.rows.length}</div><div class="stat-label">Department sheets submitted</div></div><div class="card"><div class="stat">${overdue}</div><div class="stat-label">Overdue sheets</div></div><div class="card"><div class="stat">${d.rows.length-done}</div><div class="stat-label">Still outstanding</div></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Subject</th><th>Teacher</th><th>Status</th><th>Deadline</th><th>Updated</th></tr></thead><tbody>${d.rows.map(r=>`<tr><td>${esc(r.className)}</td><td><b>${esc(r.subjectName)}</b></td><td>${esc(r.teacherName)}</td><td>${statusPill(r.status,r.deadline)}</td><td>${fmtDate(d.assessment.dueAt)}</td><td>${fmtDate(r.updatedAt)}</td></tr>`).join('')}</tbody></table></div>`;
-    };
-    byId('hodAssess').addEventListener('change', load); await load();
+    if(!state.assessments.length){content.innerHTML='<div class="empty">No assessment.</div>';return;}
+    content.innerHTML=`<div class="toolbar premium-toolbar"><select id="hodAssess">${state.assessments.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></div><div id="hodProgressBody"></div>`;
+    const load=async()=>{const d=await api(`/api/hod/progress?assessmentId=${encodeURIComponent(byId('hodAssess').value)}`);const done=d.rows.filter(r=>['SUBMITTED','LOCKED','CORRECTION_REQUESTED'].includes(r.status)).length;const overdue=d.rows.filter(r=>r.deadline.code==='OVERDUE').length;byId('hodProgressBody').innerHTML=`<div class="grid grid-3"><div class="card"><div class="stat">${done}/${d.rows.length}</div><div class="stat-label">Submitted</div></div><div class="card"><div class="stat">${overdue}</div><div class="stat-label">Overdue</div></div><div class="card"><div class="stat">${d.rows.length-done}</div><div class="stat-label">Outstanding</div></div></div><div class="table-wrap space-top"><table class="table"><thead><tr><th>Class</th><th>Subject</th><th>Teacher</th><th>Status</th><th>Deadline</th></tr></thead><tbody>${d.rows.map(r=>`<tr><td>${esc(r.className)}</td><td><b>${esc(r.subjectName)}</b></td><td>${esc(r.teacherName)}</td><td>${statusPill(r.status,r.deadline)}</td><td>${fmtDate(r.deadline.dueAt)}</td></tr>`).join('')}</tbody></table></div>`};byId('hodAssess').onchange=load;await load();
   }
+
+  async function renderEscalations(content) {
+    const d=await api('/api/escalations');
+    content.innerHTML=`<div class="page-intro"><div><h3>Escalations</h3><p>Outstanding results move through class teacher → HOD → Administration without being hidden.</p></div></div><div class="escalation-list">${d.escalations.length?d.escalations.map(e=>`<article class="escalation-card"><div class="escalation-head"><div><span class="class-chip">${esc(e.assignment?.className||'')}</span><b>${esc(e.assignment?.subjectName||'')}</b><small>${esc(e.assignment?.teacherName||'')}</small></div><span class="pill pill-orange">${esc(e.status)}</span></div><p>${esc(e.note||'No note')}</p><div class="tiny muted">${esc(e.assessment?.name||'')} • Opened ${fmtDate(e.createdAt)}</div><div class="escalation-actions">${isRole('HOD')?`<button class="btn btn-secondary" data-hod-follow="${e.id}">Follow up teacher</button>`:''}${isRole('ADMIN')?`<button class="btn btn-secondary" data-remind-hod="${e.id}">Send to HOD</button><button class="btn btn-secondary" data-extend="${e.id}">Extend deadline</button><button class="btn btn-gold" data-provisional="${e.id}">Authorize provisional report</button><button class="btn btn-green" data-resolve="${e.id}">Resolve</button>`:''}</div></article>`).join(''):'<div class="empty">No escalations.</div>'}</div>`;
+    content.querySelectorAll('[data-hod-follow]').forEach(b=>b.onclick=()=>hodFollow(b.dataset.hodFollow));
+    content.querySelectorAll('[data-remind-hod]').forEach(b=>b.onclick=()=>adminEsc(b.dataset.remindHod,'REMIND_HOD'));
+    content.querySelectorAll('[data-provisional]').forEach(b=>b.onclick=()=>adminEsc(b.dataset.provisional,'AUTHORIZE_PROVISIONAL'));
+    content.querySelectorAll('[data-resolve]').forEach(b=>b.onclick=()=>adminEsc(b.dataset.resolve,'RESOLVE'));
+    content.querySelectorAll('[data-extend]').forEach(b=>b.onclick=()=>extendDeadline(b.dataset.extend));
+  }
+  async function hodFollow(id){const note=prompt('Message to the teacher:','Please submit the outstanding results as soon as possible.');if(note===null)return;try{await api('/api/hod/escalation-action',{method:'POST',body:{escalationId:id,note}});toast('Teacher notified');await navigate('escalations')}catch(e){toast(e.message,true)}}
+  async function adminEsc(id,action){const note=prompt(action==='AUTHORIZE_PROVISIONAL'?'Reason for provisional release:':'Optional note:','');if(note===null)return;try{await api('/api/admin/escalation-action',{method:'POST',body:{escalationId:id,action,note}});toast('Escalation updated');await navigate('escalations')}catch(e){toast(e.message,true)}}
+  async function extendDeadline(id){const due=prompt('New deadline (example: 2026-09-23T16:00:00+02:00):');if(!due)return;try{await api('/api/admin/escalation-action',{method:'POST',body:{escalationId:id,action:'EXTEND_DEADLINE',dueAt:due}});toast('Deadline extended');await navigate('escalations')}catch(e){toast(e.message,true)}}
 
   async function renderAdmin(content) {
-    const d = await api('/api/admin/setup');
-    const teachers = d.users.filter(u => (u.roles || []).includes('TEACHER'));
-    content.innerHTML = `
-      <div class="grid grid-2">
-        <div class="card"><h3>Add staff account</h3><form id="addUserForm" class="form-grid">
-          <div><label>Name</label><input id="newName" required></div><div><label>Username</label><input id="newUsername" required></div>
-          <div><label>Temporary password</label><input id="newPassword" value="change123" required></div><div><label>Department</label><select id="newDept"><option value="">None</option>${d.departments.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></div>
-          <div class="span-2"><label>Role</label><select id="newRole"><option value="TEACHER">Teacher</option><option value="HOD_TEACHER">HOD + Teacher</option><option value="HEAD">Head Teacher</option></select></div>
-          <button class="btn btn-primary span-2" type="submit">Create account</button>
-        </form></div>
-        <div class="card"><h3>Assign class teacher</h3><form id="classTeacherForm" class="stack"><div><label>Class</label><select id="ctClass">${d.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div><label>Class teacher</label><select id="ctTeacher">${teachers.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select></div><button class="btn btn-primary" type="submit">Assign class teacher</button></form></div>
-        <div class="card"><h3>Create class</h3><form id="classForm" class="stack"><div><label>Class name</label><input id="className" placeholder="e.g. 11A" required></div><div><label>Level</label><input id="classLevel" placeholder="e.g. Grade 11"></div><div><label>Grading system</label><select id="classGrading"><option value="CBC">CBC Grades 1–5</option><option value="LEGACY">Existing/legacy scale</option></select></div><button class="btn btn-primary">Create class</button></form></div>
-        <div class="card"><h3>Create assessment & deadline</h3><form id="assessmentForm" class="stack"><div><label>Assessment name</label><input id="assessName" placeholder="e.g. Term 3 Week 8 Assessment" required></div><div><label>Term</label><input id="assessTerm" placeholder="Term 3"></div><div><label>Year</label><input id="assessYear" type="number" value="${new Date().getFullYear()}"></div><div><label>Results deadline</label><input id="assessDue" type="datetime-local" required></div><button class="btn btn-primary">Create assessment</button></form></div>
-      </div>
-      <div class="card" style="margin-top:16px"><h3>Classes</h3><div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Level</th><th>Grading</th><th>Class teacher</th></tr></thead><tbody>${d.classes.map(c=>{const t=d.users.find(u=>u.id===c.classTeacherUserId);return `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.level)}</td><td>${esc(c.gradingSystem)}</td><td>${esc(t?.name||'Not assigned')}</td></tr>`}).join('')}</tbody></table></div></div>`;
-    byId('addUserForm').addEventListener('submit', async e => {e.preventDefault();const role=byId('newRole').value;try{await api('/api/admin/user',{method:'POST',body:{name:byId('newName').value,username:byId('newUsername').value,password:byId('newPassword').value,departmentId:byId('newDept').value||null,roles:role==='HOD_TEACHER'?['HOD','TEACHER']:[role]}});toast('Staff account created');await renderAdmin(content)}catch(err){toast(err.message,true)}});
-    byId('classTeacherForm').addEventListener('submit', async e => {e.preventDefault();try{await api('/api/admin/class-teacher',{method:'POST',body:{classId:byId('ctClass').value,teacherUserId:byId('ctTeacher').value}});toast('Class teacher assigned');await bootstrap()}catch(err){toast(err.message,true)}});
-    byId('classForm').addEventListener('submit', async e => {e.preventDefault();try{await api('/api/admin/class',{method:'POST',body:{name:byId('className').value,level:byId('classLevel').value,gradingSystem:byId('classGrading').value}});toast('Class created');await renderAdmin(content)}catch(err){toast(err.message,true)}});
-    byId('assessmentForm').addEventListener('submit', async e => {e.preventDefault();try{const due=new Date(byId('assessDue').value).toISOString();await api('/api/admin/assessment',{method:'POST',body:{name:byId('assessName').value,term:byId('assessTerm').value,year:byId('assessYear').value,dueAt:due}});toast('Assessment created');const a=await api('/api/assessments');state.assessments=a.assessments;await renderAdmin(content)}catch(err){toast(err.message,true)}});
+    const d=await api('/api/admin/setup'); const teachers=d.users.filter(u=>(u.roles||[]).includes('TEACHER'));
+    content.innerHTML=`<div class="admin-hero"><div><span class="eyebrow">ADMIN CONTROL CENTRE</span><h2>Configure the school once</h2><p>Staff, departments, classes, subjects, pupils, assessments and report deadlines.</p></div><button id="backupBtn" class="btn btn-gold">Download data backup</button></div>
+    <div class="admin-grid">
+      <div class="card"><h3>Add staff account</h3><form id="addUserForm" class="stack"><input id="newName" placeholder="Full name" required><input id="newUsername" placeholder="Username" required><input id="newPhone" placeholder="Phone (optional)"><input id="newPassword" value="change123" required><select id="newDept"><option value="">No department</option>${d.departments.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select><select id="newRole"><option value="TEACHER">Teacher</option><option value="HOD_TEACHER">HOD + Teacher</option><option value="HEAD">Head Teacher</option></select><button class="btn btn-primary">Create staff account</button></form></div>
+      <div class="card"><h3>Create department / subject</h3><form id="deptForm" class="inline-form"><input id="deptName" placeholder="Department name"><button class="btn btn-secondary">Add department</button></form><hr><form id="subjectForm" class="stack"><input id="subjectName" placeholder="Subject name"><select id="subjectDept">${d.departments.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select><button class="btn btn-primary">Add subject</button></form></div>
+      <div class="card"><h3>Create class</h3><form id="classForm" class="stack"><input id="className" placeholder="e.g. 10P" required><input id="classLevel" placeholder="e.g. Grade 10 / Form 1"><select id="classGrading"><option value="CBC">CBC Grades 1–5</option><option value="LEGACY">Legacy Grades 1–9</option></select><button class="btn btn-primary">Create class</button></form></div>
+      <div class="card"><h3>Assign class teacher</h3><form id="classTeacherForm" class="stack"><select id="ctClass">${d.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><select id="ctTeacher">${teachers.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select><button class="btn btn-primary">Assign class teacher</button></form></div>
+      <div class="card"><h3>Create assessment & deadline</h3><form id="assessmentForm" class="stack"><input id="assessName" placeholder="Assessment name" required><input id="assessTerm" placeholder="Term"><input id="assessYear" type="number" value="${new Date().getFullYear()}"><input id="assessDue" type="datetime-local" required><button class="btn btn-primary">Create assessment</button></form></div>
+      <div class="card"><h3>Add pupil</h3><form id="pupilForm" class="stack"><select id="pupilClass">${d.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input id="pupilName" placeholder="Pupil name" required><div class="two-cols"><select id="pupilSex"><option value="">Sex</option><option value="M">Male</option><option value="F">Female</option></select><input id="pupilExam" placeholder="Exam number"></div><input id="pupilParent" placeholder="Parent/guardian phone"><label class="check-row"><input id="pupilRepeater" type="checkbox"> Repeater</label><button class="btn btn-primary">Add pupil</button></form></div>
+      <div class="card"><h3>Import pupils from CSV</h3><p class="tiny muted">Columns: name, sex, examNo, parentPrimary, isRepeater</p><select id="csvClass">${d.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input id="csvFile" type="file" accept=".csv,text/csv"><button id="importCsv" class="btn btn-secondary full">Import CSV</button></div>
+      <div class="card"><h3>School details</h3><form id="schoolForm" class="stack"><input id="schoolName" value="${esc(d.school.name||'')}" placeholder="School name"><input id="schoolMotto" value="${esc(d.school.motto||'')}" placeholder="Motto"><input id="schoolAddress" value="${esc(d.school.address||'')}" placeholder="Address"><input id="schoolEmail" value="${esc(d.school.email||'')}" placeholder="Email"><button class="btn btn-secondary">Save school details</button></form></div>
+    </div>
+    <div class="card space-top"><h3>Classes</h3><div class="table-wrap"><table class="table"><thead><tr><th>Class</th><th>Level</th><th>Grading</th><th>Class teacher</th></tr></thead><tbody>${d.classes.map(c=>{const t=d.users.find(u=>u.id===c.classTeacherUserId);return `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.level)}</td><td>${esc(c.gradingSystem)}</td><td>${esc(t?.name||'Not assigned')}</td></tr>`}).join('')}</tbody></table></div></div>`;
+    wireAdminForms(content,d);
   }
 
-  async function renderSchoolProgress(content) {
-    if (!state.assessments.length) { content.innerHTML='<div class="empty">No assessment.</div>'; return; }
-    content.innerHTML = `<div class="toolbar" style="margin-bottom:14px"><label style="margin:0">Assessment</label><select id="schoolAssess" style="width:auto">${state.assessments.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></div><div id="schoolProgressBody"></div>`;
-    const load = async () => {
-      const d=await api(`/api/school/progress?assessmentId=${encodeURIComponent(byId('schoolAssess').value)}`);
-      const done=d.rows.filter(r=>['SUBMITTED','LOCKED'].includes(r.status)).length;const overdue=d.rows.filter(r=>r.deadline.code==='OVERDUE').length;
-      const deptMap={};d.rows.forEach(r=>{const k=r.departmentName||'Other';deptMap[k]=deptMap[k]||{total:0,done:0};deptMap[k].total++;if(['SUBMITTED','LOCKED'].includes(r.status))deptMap[k].done++});
-      byId('schoolProgressBody').innerHTML=`<div class="grid grid-3" style="margin-bottom:16px"><div class="card"><div class="stat">${done}/${d.rows.length}</div><div class="stat-label">School result sheets submitted</div></div><div class="card"><div class="stat">${overdue}</div><div class="stat-label">Overdue sheets</div></div><div class="card"><div class="stat">${d.rows.length-done}</div><div class="stat-label">Outstanding sheets</div></div></div><div class="grid grid-4" style="margin-bottom:16px">${Object.entries(deptMap).map(([k,v])=>`<div class="card"><b>${esc(k)}</b><div class="stat" style="font-size:22px;margin-top:7px">${v.done}/${v.total}</div><div class="stat-label">submitted</div></div>`).join('')}</div><div class="table-wrap"><table class="table"><thead><tr><th>Department</th><th>Class</th><th>Subject</th><th>Teacher</th><th>Status</th><th>Updated</th></tr></thead><tbody>${d.rows.map(r=>`<tr><td>${esc(r.departmentName)}</td><td>${esc(r.className)}</td><td><b>${esc(r.subjectName)}</b></td><td>${esc(r.teacherName)}</td><td>${statusPill(r.status,r.deadline)}</td><td>${fmtDate(r.updatedAt)}</td></tr>`).join('')}</tbody></table></div>`;
-    };
-    byId('schoolAssess').addEventListener('change',load);await load();
+  function wireAdminForms(content,d){
+    byId('addUserForm').onsubmit=async e=>{e.preventDefault();const r=byId('newRole').value;try{await api('/api/admin/user',{method:'POST',body:{name:byId('newName').value,username:byId('newUsername').value,phone:byId('newPhone').value,password:byId('newPassword').value,departmentId:byId('newDept').value||null,roles:r==='HOD_TEACHER'?['HOD','TEACHER']:[r]}});toast('Staff account created');await renderAdmin(content)}catch(err){toast(err.message,true)}};
+    byId('deptForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/department',{method:'POST',body:{name:byId('deptName').value}});toast('Department created');await renderAdmin(content)}catch(err){toast(err.message,true)}};
+    byId('subjectForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/subject',{method:'POST',body:{name:byId('subjectName').value,departmentId:byId('subjectDept').value}});toast('Subject created');await renderAdmin(content)}catch(err){toast(err.message,true)}};
+    byId('classForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/class',{method:'POST',body:{name:byId('className').value,level:byId('classLevel').value,gradingSystem:byId('classGrading').value}});toast('Class created');await renderAdmin(content)}catch(err){toast(err.message,true)}};
+    byId('classTeacherForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/class-teacher',{method:'POST',body:{classId:byId('ctClass').value,teacherUserId:byId('ctTeacher').value}});toast('Class teacher assigned');await bootstrap()}catch(err){toast(err.message,true)}};
+    byId('assessmentForm').onsubmit=async e=>{e.preventDefault();try{const due=new Date(byId('assessDue').value).toISOString();await api('/api/admin/assessment',{method:'POST',body:{name:byId('assessName').value,term:byId('assessTerm').value,year:byId('assessYear').value,dueAt:due}});toast('Assessment created');const a=await api('/api/assessments');state.assessments=a.assessments;await renderAdmin(content)}catch(err){toast(err.message,true)}};
+    byId('pupilForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/pupil',{method:'POST',body:{classId:byId('pupilClass').value,name:byId('pupilName').value,sex:byId('pupilSex').value,examNo:byId('pupilExam').value,parentPrimary:byId('pupilParent').value,isRepeater:byId('pupilRepeater').checked}});toast('Pupil added');byId('pupilName').value='';}catch(err){toast(err.message,true)}};
+    byId('schoolForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/school',{method:'POST',body:{name:byId('schoolName').value,motto:byId('schoolMotto').value,address:byId('schoolAddress').value,email:byId('schoolEmail').value}});toast('School details saved');await bootstrap()}catch(err){toast(err.message,true)}};
+    byId('importCsv').onclick=()=>importCsvPupils();
+    byId('backupBtn').onclick=async()=>{try{const x=await api('/api/admin/backup');const blob=new Blob([JSON.stringify(x,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`EduSend_Backup_${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(a.href);toast('Backup downloaded')}catch(e){toast(e.message,true)}};
   }
 
-  function showModal(html) {
-    closeModal();
-    const wrap = document.createElement('div'); wrap.className='modal-backdrop'; wrap.id='modalBackdrop'; wrap.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(wrap);
-    wrap.addEventListener('click', e => { if (e.target===wrap || e.target.matches('[data-close]')) closeModal(); });
-  }
-  function closeModal(){ byId('modalBackdrop')?.remove(); }
+  async function importCsvPupils(){const f=byId('csvFile').files?.[0];if(!f){toast('Choose a CSV file first',true);return}const text=await f.text();const lines=text.split(/\r?\n/).filter(Boolean);if(lines.length<2){toast('CSV has no pupil rows',true);return}const headers=lines[0].split(',').map(x=>x.trim());const rows=lines.slice(1).map(line=>{const vals=line.split(',').map(x=>x.trim().replace(/^"|"$/g,''));const o={};headers.forEach((h,i)=>o[h]=vals[i]||'');return o});try{const r=await api('/api/admin/pupils-bulk',{method:'POST',body:{classId:byId('csvClass').value,pupils:rows}});toast(`${r.count} pupils imported`)}catch(e){toast(e.message,true)}}
 
-  function connectEvents() {
-    disconnectEvents();
-    if (!state.token) return;
-    const es = new EventSource(`/api/events?token=${encodeURIComponent(state.token)}`);
-    state.eventSource = es;
-    es.addEventListener('update', async (e) => {
-      let data={};try{data=JSON.parse(e.data)}catch{}
-      if (state.page==='classTeacher' && data.type==='RESULT_SHEET_UPDATED') {
-        const c=byId('classSelect'),a=byId('assessmentSelect'); if(c&&a&&c.value===data.classId&&a.value===data.assessmentId) await loadClassOverview(c.value,a.value);
-      }
-      if (state.page==='hodProgress' && data.type==='RESULT_SHEET_UPDATED') navigate('hodProgress');
-      if (state.page==='schoolProgress' && data.type==='RESULT_SHEET_UPDATED') navigate('schoolProgress');
-    });
-    state.refreshTimer = setInterval(() => {
-      if (state.page==='classTeacher') { const c=byId('classSelect'),a=byId('assessmentSelect'); if(c&&a) loadClassOverview(c.value,a.value).catch(()=>{}); }
-    }, 15000);
-  }
-  function disconnectEvents(){ if(state.eventSource){state.eventSource.close();state.eventSource=null} if(state.refreshTimer){clearInterval(state.refreshTimer);state.refreshTimer=null} }
+  async function renderSchoolProgress(content){if(!state.assessments.length){content.innerHTML='<div class="empty">No assessment.</div>';return;}content.innerHTML=`<div class="toolbar premium-toolbar"><select id="schoolAssess">${state.assessments.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></div><div id="schoolProgressBody"></div>`;const load=async()=>{const d=await api(`/api/school/progress?assessmentId=${encodeURIComponent(byId('schoolAssess').value)}`);const done=d.rows.filter(r=>['SUBMITTED','LOCKED','CORRECTION_REQUESTED'].includes(r.status)).length;const overdue=d.rows.filter(r=>r.deadline.code==='OVERDUE').length;byId('schoolProgressBody').innerHTML=`<div class="grid grid-3"><div class="card"><div class="stat">${done}/${d.rows.length}</div><div class="stat-label">School sheets received</div></div><div class="card"><div class="stat">${overdue}</div><div class="stat-label">Overdue</div></div><div class="card"><div class="stat">${d.classes.filter(c=>c.readiness.finalReady).length}/${d.classes.length}</div><div class="stat-label">Classes report-ready</div></div></div><div class="class-readiness-grid space-top">${d.classes.map(x=>`<div class="card"><b>${esc(x.class.name)}</b><div class="progressbar"><span style="width:${x.readiness.totalSubjects?Math.round(x.readiness.submittedSubjects/x.readiness.totalSubjects*100):0}%"></span></div><small>${x.readiness.submittedSubjects}/${x.readiness.totalSubjects} subjects • ${x.readiness.finalReady?'Ready':x.readiness.provisionalAllowed?'Provisional approved':'Waiting'}</small></div>`).join('')}</div><div class="table-wrap space-top"><table class="table"><thead><tr><th>Department</th><th>Class</th><th>Subject</th><th>Teacher</th><th>Status</th><th>Deadline</th></tr></thead><tbody>${d.rows.map(r=>`<tr><td>${esc(r.departmentName)}</td><td>${esc(r.className)}</td><td><b>${esc(r.subjectName)}</b></td><td>${esc(r.teacherName)}</td><td>${statusPill(r.status,r.deadline)}</td><td>${fmtDate(r.deadline.dueAt)}</td></tr>`).join('')}</tbody></table></div>`};byId('schoolAssess').onchange=load;await load();}
 
-  if (state.token) bootstrap(); else renderLogin();
+  async function renderAudit(content){const d=await api('/api/admin/audit');content.innerHTML=`<div class="page-intro"><div><h3>Audit trail</h3><p>Who changed what, and when.</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Time</th><th>User</th><th>Action</th><th>Detail</th></tr></thead><tbody>${d.rows.map(r=>`<tr><td>${fmtDate(r.at)}</td><td>${esc(r.actorName)}</td><td><b>${esc(r.action)}</b></td><td>${esc(r.detail)}</td></tr>`).join('')}</tbody></table></div>`;}
+
+  function showModal(html){closeModal();const w=document.createElement('div');w.className='modal-backdrop';w.id='modalBackdrop';w.innerHTML=`<div class="modal">${html}</div>`;document.body.appendChild(w);w.onclick=e=>{if(e.target===w||e.target.matches('[data-close]'))closeModal()};}
+  function closeModal(){clearTimeout(state.autosaveTimer);byId('modalBackdrop')?.remove();state.activeSheet=null;}
+
+  function connectEvents(){disconnectEvents();if(!state.token)return;const es=new EventSource(`/api/events?token=${encodeURIComponent(state.token)}`);state.eventSource=es;es.addEventListener('update',async e=>{let d={};try{d=JSON.parse(e.data)}catch{}if(d.type==='NOTIFICATION'){toast(d.notification?.title||'New notification');await refreshNotifications()}if(state.page==='classTeacher'&&d.type==='RESULT_SHEET_UPDATED'){const c=byId('classSelect'),a=byId('assessmentSelect');if(c&&a)loadClassOverview(c.value,a.value).catch(()=>{})}if(state.page==='hodProgress'&&d.type==='RESULT_SHEET_UPDATED')navigate('hodProgress');if(state.page==='schoolProgress'&&d.type==='RESULT_SHEET_UPDATED')navigate('schoolProgress');if(state.page==='escalations'&&d.type==='ESCALATION_UPDATED')navigate('escalations')});state.refreshTimer=setInterval(()=>{if(state.page==='classTeacher'){const c=byId('classSelect'),a=byId('assessmentSelect');if(c&&a)loadClassOverview(c.value,a.value).catch(()=>{})}},20000);state.notificationTimer=setInterval(refreshNotifications,30000);}
+  function disconnectEvents(){if(state.eventSource){state.eventSource.close();state.eventSource=null}if(state.refreshTimer){clearInterval(state.refreshTimer);state.refreshTimer=null}if(state.notificationTimer){clearInterval(state.notificationTimer);state.notificationTimer=null}}
+
+  if(state.token) bootstrap(); else renderLogin();
 })();

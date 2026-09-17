@@ -1,15 +1,8 @@
-const CACHE = 'edusend-shell-v1-4';
+const CACHE = 'edusend-shell-v2-0-0';
 const SHELL = [
-  '/',
-  '/index.html',
-  '/styles.css',
-  '/app.js',
-  '/pwa.js',
-  '/manifest.webmanifest',
-  '/offline.html',
-  '/icon-192.png',
-  '/icon-512.png',
-  '/apple-touch-icon.png'
+  '/', '/index.html', '/styles.css', '/app.js', '/pwa.js',
+  '/manifest.webmanifest', '/manifest.json', '/offline.html',
+  '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png'
 ];
 
 self.addEventListener('install', event => {
@@ -20,6 +13,8 @@ self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
+      .then(() => self.clients.matchAll({ type:'window' }))
+      .then(clients => clients.forEach(c => c.postMessage({ type:'EDUSEND_UPDATED', version:'2.0.0' })))
   );
 });
 
@@ -28,31 +23,32 @@ self.addEventListener('fetch', event => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
 
-  // Never cache authenticated API calls or event streams.
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(fetch(req));
     return;
   }
 
-  // Navigations: prefer network so deployments update quickly; fall back to installed shell.
   if (req.mode === 'navigate') {
     event.respondWith(
-      fetch(req).catch(async () => (await caches.match('/index.html')) || (await caches.match('/offline.html')))
+      fetch(req, { cache:'no-store' })
+        .then(res => { const copy=res.clone(); caches.open(CACHE).then(c=>c.put('/index.html',copy)); return res; })
+        .catch(async () => (await caches.match('/index.html')) || (await caches.match('/offline.html')))
     );
     return;
   }
 
-  // App assets: cache first, then refresh cache from network.
-  event.respondWith(
-    caches.match(req).then(cached => {
-      const network = fetch(req).then(res => {
-        if (res && res.ok) {
-          const copy = res.clone();
-          caches.open(CACHE).then(cache => cache.put(req, copy));
-        }
-        return res;
-      }).catch(() => cached);
-      return cached || network;
-    })
-  );
+  const core = ['/app.js','/styles.css','/pwa.js','/manifest.webmanifest','/manifest.json','/service-worker.js'];
+  if (core.includes(url.pathname)) {
+    event.respondWith(
+      fetch(req, { cache:'no-store' })
+        .then(res => { if(res&&res.ok){const copy=res.clone();caches.open(CACHE).then(c=>c.put(req,copy));} return res; })
+        .catch(() => caches.match(req))
+    );
+    return;
+  }
+
+  event.respondWith(caches.match(req).then(cached => cached || fetch(req).then(res => {
+    if (res && res.ok) { const copy=res.clone(); caches.open(CACHE).then(c=>c.put(req,copy)); }
+    return res;
+  })));
 });
