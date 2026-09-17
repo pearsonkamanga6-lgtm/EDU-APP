@@ -11,11 +11,11 @@
   "theme_color": "#0b2f6b",
   "categories": ["education", "productivity"],
   "icons": [
-    {"src":"/icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
-    {"src":"/icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+    {"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},
+    {"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"}
   ],
   "shortcuts": [
-    {"name":"My Result Sheets","short_name":"Results","url":"/?source=pwa&open=teacher","icons":[{"src":"/icons/icon-192.png","sizes":"192x192"}]},
-    {"name":"Dashboard","short_name":"Dashboard","url":"/?source=pwa&open=dashboard","icons":[{"src":"/icons/icon-192.png","sizes":"192x192"}]}
+    {"name":"My Result Sheets","short_name":"Results","url":"/?source=pwa&open=teacher","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png"}]},
+    {"name":"Dashboard","short_name":"Dashboard","url":"/?source=pwa&open=dashboard","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png"}]}
   ]
 }

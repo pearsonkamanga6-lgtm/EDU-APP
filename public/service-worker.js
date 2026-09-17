@@ -1,4 +1,4 @@
-const CACHE = 'edusend-shell-v1-1';
+const CACHE = 'edusend-shell-v1-2';
 const SHELL = [
   '/',
   '/index.html',
@@ -7,9 +7,9 @@ const SHELL = [
   '/pwa.js',
   '/manifest.webmanifest',
   '/offline.html',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png',
-  '/icons/apple-touch-icon.png'
+  '/icon-192.png',
+  '/icon-512.png',
+  '/apple-touch-icon.png'
 ];
 
 self.addEventListener('install', event => {
