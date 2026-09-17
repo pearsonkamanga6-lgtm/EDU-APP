@@ -6,11 +6,12 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'data.json');
+const DATA_BACKUP_FILE = path.join(DATA_DIR, 'data.json.bak');
 const PUPIL_SEED_FILE = path.join(DATA_DIR, 'pupils12l.json');
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -318,18 +319,41 @@ function loadData() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(seed, null, 2));
     return seed;
   }
-  const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  const migrated = migrateData(raw);
-  fs.writeFileSync(DATA_FILE, JSON.stringify(migrated, null, 2));
-  return migrated;
+  try {
+    const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    const migrated = migrateData(raw);
+    fs.writeFileSync(DATA_FILE, JSON.stringify(migrated, null, 2));
+    return migrated;
+  } catch (err) {
+    console.error('Primary EduSend data file could not be read:', err.message);
+    try {
+      if (fs.existsSync(DATA_BACKUP_FILE)) {
+        const raw = JSON.parse(fs.readFileSync(DATA_BACKUP_FILE, 'utf8'));
+        const recovered = migrateData(raw);
+        fs.writeFileSync(DATA_FILE, JSON.stringify(recovered, null, 2));
+        console.warn('EduSend recovered data from data.json.bak');
+        return recovered;
+      }
+    } catch (backupErr) {
+      console.error('Backup data file could not be read:', backupErr.message);
+    }
+    throw err;
+  }
 }
 
 let db = loadData();
 
 function saveData() {
+  db.storageMeta ||= { revision:0, lastSavedAt:null };
+  db.storageMeta.revision = Number(db.storageMeta.revision || 0) + 1;
+  db.storageMeta.lastSavedAt = nowIso();
   const tmp = `${DATA_FILE}.tmp`;
+  if (fs.existsSync(DATA_FILE)) {
+    try { fs.copyFileSync(DATA_FILE, DATA_BACKUP_FILE); } catch (e) { console.warn('EduSend backup copy failed:', e.message); }
+  }
   fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
   fs.renameSync(tmp, DATA_FILE);
+  return { revision:db.storageMeta.revision, lastSavedAt:db.storageMeta.lastSavedAt, dataFile:DATA_FILE };
 }
 
 function audit(actorUserId, action, detail = '') {
@@ -528,7 +552,7 @@ function resultRowForPupil(sheet, pupilId) {
 async function api(req, res, urlObj) {
   const pathname = urlObj.pathname;
 
-  if (req.method === 'GET' && pathname === '/api/version') return sendJson(res, 200, { version: APP_VERSION });
+  if (req.method === 'GET' && pathname === '/api/version') return sendJson(res, 200, { version: APP_VERSION, storageRevision: db.storageMeta?.revision || 0, lastSavedAt: db.storageMeta?.lastSavedAt || null });
 
   if (req.method === 'POST' && pathname === '/api/login') {
     const body = await readJson(req);
@@ -661,9 +685,17 @@ async function api(req, res, urlObj) {
       sheet.status = Object.keys(marks).length || Object.values(markStates).some(s => s !== 'PENDING') ? 'DRAFT' : 'NOT_STARTED';
       audit(user.id, 'RESULTS_DRAFT_SAVED', `${assignment.classId}/${assignment.subjectId}/${assessment.id}`);
     }
-    saveData();
+    const storage = saveData();
     broadcastEvent({ type: 'RESULT_SHEET_UPDATED', classId: assignment.classId, subjectId: assignment.subjectId, assessmentId: assessment.id, assignmentId: assignment.id, status: sheet.status, at: sheet.updatedAt }, escalationAudienceForAssignment(assignment));
-    return sendJson(res, 200, { ok: true, status: sheet.status, updatedAt: sheet.updatedAt, submittedAt: sheet.submittedAt });
+    const cls = db.classes.find(c => c.id === assignment.classId);
+    const subject = db.subjects.find(s => s.id === assignment.subjectId);
+    const classTeacher = db.users.find(u => u.id === cls?.classTeacherUserId && u.active !== false);
+    return sendJson(res, 200, {
+      ok:true, status:sheet.status, updatedAt:sheet.updatedAt, submittedAt:sheet.submittedAt,
+      className:cls?.name || '', subjectName:subject?.name || '',
+      classTeacherName:classTeacher?.name || '', classTeacherAssigned:!!classTeacher,
+      storageRevision:storage.revision, storageSavedAt:storage.lastSavedAt
+    });
   }
 
   if (req.method === 'GET' && pathname === '/api/class-teacher/classes') {
@@ -916,11 +948,28 @@ async function api(req, res, urlObj) {
 
   if (req.method === 'POST' && pathname === '/api/admin/class-teacher') {
     if (!hasRole(user, 'ADMIN')) return sendError(res, 403, 'Administrator access required');
-    const body = await readJson(req); const cls = db.classes.find(c => c.id === body.classId); const teacher = db.users.find(u => u.id === body.teacherUserId && u.active !== false);
-    if (!cls || !teacher || !hasRole(teacher, 'TEACHER')) return sendError(res, 400, 'Valid class and teacher required');
-    cls.classTeacherUserId = teacher.id; audit(user.id, 'CLASS_TEACHER_SET', `${cls.name} -> ${teacher.name}`);
-    createNotification(teacher.id, 'CLASS_TEACHER', 'Class teacher assignment', `You are now the class teacher for ${cls.name}.`, { classId: cls.id });
-    saveData(); broadcastEvent({ type: 'CLASS_TEACHER_UPDATED', classId: cls.id, teacherUserId: teacher.id }, [teacher.id, user.id]); return sendJson(res, 200, { class: cls });
+    const body = await readJson(req);
+    const cls = db.classes.find(c => c.id === body.classId && c.active !== false);
+    if (!cls) return sendError(res, 400, 'Valid class required');
+    const oldTeacherId = cls.classTeacherUserId || null;
+    let teacher = null;
+    if (body.teacherUserId) {
+      teacher = db.users.find(u => u.id === body.teacherUserId && u.active !== false);
+      if (!teacher || !hasRole(teacher, 'TEACHER')) return sendError(res, 400, 'Valid teacher required');
+      cls.classTeacherUserId = teacher.id;
+      audit(user.id, 'CLASS_TEACHER_SET', `${cls.name} -> ${teacher.name}`);
+      createNotification(teacher.id, 'CLASS_TEACHER', 'Class teacher assignment', `You are now the class teacher for ${cls.name}. Class Progress and Reports access are active automatically.`, { classId: cls.id });
+    } else {
+      cls.classTeacherUserId = null;
+      audit(user.id, 'CLASS_TEACHER_CLEARED', cls.name);
+    }
+    if (oldTeacherId && oldTeacherId !== cls.classTeacherUserId) {
+      createNotification(oldTeacherId, 'CLASS_TEACHER_CHANGED', 'Class teacher assignment changed', `You are no longer assigned as class teacher for ${cls.name}.`, { classId: cls.id });
+    }
+    const storage=saveData();
+    const audience=[user.id,oldTeacherId,cls.classTeacherUserId].filter(Boolean);
+    broadcastEvent({ type:'CLASS_TEACHER_UPDATED', classId:cls.id, teacherUserId:cls.classTeacherUserId, oldTeacherUserId:oldTeacherId }, audience);
+    return sendJson(res, 200, { class:cls, classTeacherName:teacher?.name || '', storageRevision:storage.revision });
   }
 
   if (req.method === 'POST' && pathname === '/api/admin/class') {

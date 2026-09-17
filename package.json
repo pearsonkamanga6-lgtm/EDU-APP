@@ -1,8 +1,8 @@
 {
   "name": "edusend-school-results",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
-  "description": "EduSend V2.1 school results workflow with Lumezi practice school data",
+  "description": "EduSend V2.2 reliable school results workflow with durable local drafts, explicit submission confirmation, and class-teacher assignment centre",
   "scripts": {
     "start": "node server.js"
   },
