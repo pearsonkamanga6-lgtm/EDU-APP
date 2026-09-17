@@ -68,9 +68,9 @@
         <div class="login-card">
           <div class="brand">
             <div class="brand-mark">ES</div>
-            <div><h1>EduSend School Results</h1><p>Role-based results management — V1</p></div>
+            <div><h1>EduSend School Results</h1><p>Role-based results management — V1.1</p></div>
           </div>
-          <div class="alert alert-blue small"><b>V1 foundation:</b> Administrator → HOD → Subject Teacher → Class Teacher workflow, with result-entry deadlines and live class updates.</div>
+          <div class="alert alert-blue small"><b>V1.1 foundation:</b> Administrator → HOD → Subject Teacher → Class Teacher workflow, with result-entry deadlines and live class updates.</div>
           <form id="loginForm">
             <div class="field"><label>Username</label><input id="username" autocomplete="username" value="kamanga" required /></div>
             <div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password" value="teach123" required /></div>
@@ -160,7 +160,7 @@
     app.innerHTML = `
       <div class="shell">
         <aside class="sidebar">
-          <div class="side-brand"><div class="brand-mark">ES</div><div><strong>EduSend</strong><div class="tiny">School Results V1</div></div></div>
+          <div class="side-brand"><div class="brand-mark">ES</div><div><strong>EduSend</strong><div class="tiny">School Results V1.1</div></div></div>
           <div class="nav">${nav}</div>
           <div class="side-user"><div class="name">${esc(u.name)}</div><div>${chips}</div><button id="logoutBtn" class="btn btn-secondary" style="margin-top:12px;width:100%">Sign out</button></div>
         </aside>
