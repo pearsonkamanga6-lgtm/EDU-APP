@@ -1,8 +1,8 @@
 {
   "name": "reportform-zm-simple-class-teacher",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "private": true,
-  "description": "Reportform ZM V3.0.3 - class-teacher-only CBC/OBC results entry with WhatsApp-ready reports.",
+  "description": "Reportform ZM V3.0.4 - class-teacher-only CBC/OBC results, plus-button subjects and pupils, V2.1-style reports, AI comments and WhatsApp-ready PDFs.",
   "scripts": {
     "start": "node server.js"
   },
