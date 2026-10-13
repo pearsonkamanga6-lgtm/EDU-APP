@@ -1,54 +1,5 @@
-const CACHE = 'edusend-shell-v2-3-0';
-const SHELL = [
-  '/', '/index.html', '/styles.css', '/app.js', '/pwa.js',
-  '/manifest.webmanifest', '/manifest.json', '/offline.html',
-  '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png'
-];
-
-self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
-});
-
-self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
-      .then(() => self.clients.claim())
-      .then(() => self.clients.matchAll({ type:'window' }))
-      .then(clients => clients.forEach(c => c.postMessage({ type:'EDUSEND_UPDATED', version:'2.3.0' })))
-  );
-});
-
-self.addEventListener('fetch', event => {
-  const req = event.request;
-  const url = new URL(req.url);
-  if (url.origin !== self.location.origin) return;
-
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(fetch(req));
-    return;
-  }
-
-  if (req.mode === 'navigate') {
-    event.respondWith(
-      fetch(req, { cache:'no-store' })
-        .then(res => { const copy=res.clone(); caches.open(CACHE).then(c=>c.put('/index.html',copy)); return res; })
-        .catch(async () => (await caches.match('/index.html')) || (await caches.match('/offline.html')))
-    );
-    return;
-  }
-
-  const core = ['/app.js','/styles.css','/pwa.js','/manifest.webmanifest','/manifest.json','/service-worker.js'];
-  if (core.includes(url.pathname)) {
-    event.respondWith(
-      fetch(req, { cache:'no-store' })
-        .then(res => { if(res&&res.ok){const copy=res.clone();caches.open(CACHE).then(c=>c.put(req,copy));} return res; })
-        .catch(() => caches.match(req))
-    );
-    return;
-  }
-
-  event.respondWith(caches.match(req).then(cached => cached || fetch(req).then(res => {
-    if (res && res.ok) { const copy=res.clone(); caches.open(CACHE).then(c=>c.put(req,copy)); }
-    return res;
-  })));
-});
+const CACHE='reportform-zm-v3-simple';
+const SHELL=['/','/index.html','/app.js','/styles.css','/manifest.webmanifest','/offline.html','/icon-192.png','/icon-512.png'];
+self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL).catch(()=>{})));self.skipWaiting();});
+self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))));self.clients.claim();});
+self.addEventListener('fetch',e=>{const u=new URL(e.request.url);if(u.origin!==location.origin||u.pathname.startsWith('/api/'))return;e.respondWith(fetch(e.request).then(r=>{const copy=r.clone();caches.open(CACHE).then(c=>c.put(e.request,copy)).catch(()=>{});return r;}).catch(()=>caches.match(e.request).then(r=>r||caches.match('/offline.html'))));});
