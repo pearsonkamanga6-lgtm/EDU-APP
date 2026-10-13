@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.0.4';
+const APP_VERSION = '3.0.5';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -136,6 +136,27 @@ function classSubjects(classId) { return db.subjects.filter(s => s.classId === c
 function classPupils(classId) { return db.pupils.filter(p => p.classId === classId && p.active !== false); }
 function markKey(assessmentId,pupilId,subjectId){ return `${assessmentId}:${pupilId}:${subjectId}`; }
 
+function standaloneUser(){
+  let user=(db.users||[]).find(u=>u.active!==false && userClass(u.id)) || (db.users||[]).find(u=>u.active!==false) || null;
+  let changed=false;
+  if(!user){
+    user={id:id('usr'),name:'',phone:'',identifier:'standalone',active:true,createdAt:nowIso()};
+    db.users.push(user);changed=true;
+  }
+  let cls=userClass(user.id);
+  if(!cls){
+    cls={id:id('cls'),teacherUserId:user.id,teacherName:user.name||'',teacherPhone:user.phone||'',schoolName:'',name:'',gradingSystem:'CBC',createdAt:nowIso()};
+    db.classes.push(cls);changed=true;
+  } else {
+    if(cls.teacherName===undefined){cls.teacherName=user.name||'';changed=true;}
+    if(cls.teacherPhone===undefined){cls.teacherPhone=user.phone||'';changed=true;}
+  }
+  let assessment=userAssessment(user.id);
+  if(!assessment){db.assessments.push({id:id('assess'),classId:cls.id,name:'Current Assessment',createdAt:nowIso()});changed=true;}
+  if(changed)saveDb();
+  return user;
+}
+
 function cleanMark(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
@@ -262,8 +283,7 @@ async function api(req,res,urlObj) {
     return sendJson(res,200,{ token:issueToken(user.id), user:safeUser(user) });
   }
 
-  const user = authUser(req);
-  if (!user) return sendError(res,401,'Please sign in again');
+  const user = standaloneUser();
 
   if (req.method === 'GET' && pathname === '/api/me') return sendJson(res,200,stateForUser(user));
   if (req.method === 'GET' && pathname === '/api/class-data') return sendJson(res,200,stateForUser(user));
@@ -289,10 +309,12 @@ async function api(req,res,urlObj) {
     const b = await readJson(req);
     const cls = userClass(user.id); const assessment = userAssessment(user.id);
     if (!cls || !assessment) return sendError(res,404,'Class not found');
+    const teacherName=String(b.teacherName||'').trim(); const teacherPhone=String(b.teacherPhone||'').trim();
     const schoolName=String(b.schoolName||'').trim(); const className=String(b.className||'').trim();
     const assessmentName=String(b.assessmentName||'').trim() || 'Current Assessment';
     const gradingSystem=normalizeGradingSystem(b.gradingSystem);
-    if(!schoolName||!className) return sendError(res,400,'School and class names are required');
+    if(!teacherName||!teacherPhone||!schoolName||!className) return sendError(res,400,'Class teacher name, phone number, school and class are required');
+    user.name=teacherName; user.phone=teacherPhone; cls.teacherName=teacherName; cls.teacherPhone=teacherPhone;
     cls.schoolName=schoolName; cls.name=className; cls.gradingSystem=gradingSystem; assessment.name=assessmentName;
 
     // Backward-compatible support for older V3 clients that still submit a subject array.
@@ -405,4 +427,4 @@ function serveStatic(pathname,res){
 }
 
 const server=http.createServer(async(req,res)=>{const urlObj=new URL(req.url,`http://${req.headers.host||'localhost'}`);try{if(urlObj.pathname.startsWith('/api/')){await api(req,res,urlObj);return;}if(!serveStatic(urlObj.pathname,res))sendError(res,404,'Not found');}catch(err){console.error(err);if(!res.headersSent)sendError(res,500,err.message||'Server error');else res.end();}});
-server.listen(PORT,HOST,()=>{console.log(`Reportform ZM V${APP_VERSION} running on http://${HOST}:${PORT}`);console.log(`Simple data file: ${DATA_FILE}`);console.log(`Online AI comments: ${OPENAI_API_KEY?'configured':'not configured (Smart Local fallback active)'}`);if(TOKEN_SECRET.includes('DEV_ONLY'))console.warn('Set TOKEN_SECRET before production use.');});
+server.listen(PORT,HOST,()=>{console.log(`Reportform ZM V${APP_VERSION} running on http://${HOST}:${PORT}`);console.log(`Simple data file: ${DATA_FILE}`);console.log(`Online AI comments: ${OPENAI_API_KEY?'configured':'not configured (Smart Local fallback active)'}`);console.log('Account sign-in: disabled (single class-teacher mode).');});
