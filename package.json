@@ -1,8 +1,8 @@
 {
-  "name": "edusend-school-results",
-  "version": "2.3.0",
+  "name": "reportform-zm-simple-class-teacher",
+  "version": "3.0.0",
   "private": true,
-  "description": "EduSend V2.3 practice school with nine distinct teachers per class and repaired reliable Save Draft / Finish & Submit workflow",
+  "description": "Reportform ZM V3.0 - simple class-teacher-only results entry and report generation.",
   "scripts": {
     "start": "node server.js"
   },
