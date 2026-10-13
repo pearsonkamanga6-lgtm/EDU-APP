@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION='3.0.2';
+  const APP_VERSION='3.0.3';
   const app=document.getElementById('app');
   const state={token:localStorage.getItem('reportform_token')||'',me:null,page:'home',saveTimer:null};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
@@ -70,24 +70,74 @@
   function stats(){const d=state.me,total=(d.pupils?.length||0)*(d.subjects?.length||0);let entered=0;for(const p of d.pupils||[])for(const s of d.subjects||[])if(d.marks?.[p.id]?.[s.id]!==null&&d.marks?.[p.id]?.[s.id]!==undefined)entered++;return{total,entered};}
 
   function renderHome(c){const d=state.me,{total,entered}=stats(),pct=total?Math.round(entered/total*100):0;c.innerHTML=`<section class="hero"><span class="eyebrow">CLASS TEACHER MODE</span><h1>${esc(d.class?.name||'My Class')}</h1><p>${d.pupils?.length||0} pupils • ${esc(d.class?.gradingSystem==='CBC'?'CBC':'OBC')} grading</p><div class="progress"><span style="width:${pct}%"></span></div><small>${entered}/${total} marks entered</small></section>
-    ${(d.subjects?.length||0)===0?'<div class="notice">First add your subjects in Class Setup.</div>':(d.pupils?.length||0)===0?'<div class="notice">Now open Pupils and enter the names of everyone in your class.</div>':''}
-    <div class="action-grid"><button class="action-card pupil-action" data-go="pupils"><b>👥 Enter Pupil Names</b><span>Type or paste the whole class list, one name per line.</span></button><button class="action-card" data-go="results"><b>✎ Enter Results</b><span>Enter marks for all pupils and subjects.</span></button><button class="action-card" data-go="reports"><b>▤ Generate Reports</b><span>Preview, download or send pupil reports on WhatsApp.</span></button><button class="action-card" data-go="setup"><b>⚙ Class Setup</b><span>Change school, class, assessment, grading system or subjects.</span></button></div>`;c.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>navigate(b.dataset.go));}
+    ${(d.subjects?.length||0)===0?'<div class="notice">First add your subjects in Class Setup.</div>':(d.pupils?.length||0)===0?'<div class="notice">Now add the pupils in your class. Tap the + Add Pupil button.</div>':''}
+    <div class="action-grid"><button class="action-card pupil-action" data-go="pupils"><b>👥 Pupils</b><span>Add pupils one by one using first name and surname.</span></button><button class="action-card" data-go="results"><b>✎ Enter Results</b><span>Enter marks for all pupils and subjects.</span></button><button class="action-card" data-go="reports"><b>▤ Generate Reports</b><span>Preview, download or send pupil reports on WhatsApp.</span></button><button class="action-card" data-go="setup"><b>⚙ Class Setup</b><span>Change school, class, assessment, grading system or subjects.</span></button></div>`;c.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>navigate(b.dataset.go));}
 
-  function pupilLine(p){const extras=[p.sex||'',p.examNo||'',p.parentPhone||''];return extras.some(Boolean)?[p.name,...extras].join(' | '):p.name;}
-  function parsePupilLine(line){const cleaned=String(line||'').trim().replace(/^\s*(?:\d+[.)\-:]?\s+|[-•*]\s*)/,'');if(!cleaned)return null;const [name='',sex='',examNo='',parentPhone='']=cleaned.split('|').map(x=>x.trim());return name?{name,sex,examNo,parentPhone}:null;}
-  function renderPupils(c){const d=state.me;const pupils=(d.pupils||[]).map(pupilLine).join('\n');c.innerHTML=`<div class="page-head"><h2>Pupil Names</h2><p>Enter every pupil in ${esc(d.class?.name||'your class')}. You can type or paste the full list.</p></div>
-    <form id="pupilForm" class="card stack pupil-entry-card">
-      <div class="pupil-count"><b>${d.pupils?.length||0} pupils saved</b><span>One pupil per line</span></div>
-      <label class="pupil-entry-label">ENTER ALL PUPIL NAMES HERE
-        <textarea id="pupils" class="pupil-entry-box" rows="18" autofocus placeholder="Tap here and type or paste names…\n\nMary Banda\nPeter Phiri\nChipo Zulu">${esc(pupils)}</textarea>
-      </label>
-      <p class="pupil-help"><b>Names only are enough.</b> Numbered lists also work. Optional details can be written as: Mary Banda | F | 12L-001 | 097xxxxxxx</p>
-      <button class="btn primary big" type="submit">Save Pupil Names</button>
-    </form>`;
-    byId('pupilForm').onsubmit=async e=>{e.preventDefault();const pupils=byId('pupils').value.split(/\n/).map(parsePupilLine).filter(Boolean);if(!pupils.length){toast('Enter at least one pupil name',true);byId('pupils').focus();return;}const btn=e.submitter;btn.disabled=true;btn.textContent='Saving pupil names…';try{const subjects=(d.subjects||[]).map(x=>x.name);state.me=await api('/api/setup',{method:'PUT',body:{schoolName:d.class?.schoolName||'',className:d.class?.name||'',assessmentName:d.assessment?.name||'Current Assessment',gradingSystem:d.class?.gradingSystem==='CBC'?'CBC':'OBC',subjects,pupils}});toast(`${pupils.length} pupil names saved`);renderShell();navigate('home');}catch(err){toast(err.message,true)}finally{btn.disabled=false;btn.textContent='Save Pupil Names';}};
+  function splitStoredName(p){
+    const first=String(p.firstName||'').trim();
+    const surname=String(p.surname||'').trim();
+    if(first||surname)return{firstName:first,surname};
+    const parts=String(p.name||'').trim().split(/\s+/).filter(Boolean);
+    return{firstName:parts.shift()||'',surname:parts.join(' ')};
   }
 
-  function renderSetup(c){const d=state.me;const subjects=(d.subjects||[]).map(s=>s.name).join('\n');const grading=d.class?.gradingSystem==='CBC'?'CBC':'OBC';c.innerHTML=`<div class="page-head"><h2>Class Setup</h2><p>Set the class details, grading system and subjects. Pupil names are entered separately under Pupils.</p></div><form id="setupForm" class="card stack">
+  function pupilFormHtml(p={}){
+    const n=splitStoredName(p);
+    return `<form id="singlePupilForm" class="stack pupil-form">
+      <div class="name-grid">
+        <label>First name<input id="pupilFirstName" value="${esc(n.firstName)}" placeholder="e.g. Mary" autocomplete="off" required></label>
+        <label>Surname<input id="pupilSurname" value="${esc(n.surname)}" placeholder="e.g. Banda" autocomplete="off" required></label>
+      </div>
+      <details class="optional-details" ${p.sex||p.examNo||p.parentPhone?'open':''}><summary>Optional pupil details</summary>
+        <div class="optional-grid">
+          <label>Sex<select id="pupilSex"><option value="">Not set</option><option value="F" ${p.sex==='F'?'selected':''}>Female</option><option value="M" ${p.sex==='M'?'selected':''}>Male</option></select></label>
+          <label>Exam number<input id="pupilExamNo" value="${esc(p.examNo||'')}" placeholder="Optional"></label>
+          <label>Parent / guardian WhatsApp<input id="pupilPhone" value="${esc(p.parentPhone||'')}" inputmode="tel" placeholder="e.g. 097xxxxxxx"></label>
+        </div>
+      </details>
+      <button class="btn primary big" type="submit">${p.id?'Save Changes':'Save Pupil'}</button>
+    </form>`;
+  }
+
+  function openPupilForm(pupil=null){
+    showModal(`<div class="modal-scroll pupil-modal"><div class="page-head"><h2>${pupil?'Edit Pupil':'Add Pupil'}</h2><p>Enter the pupil's first name and surname.</p></div>${pupilFormHtml(pupil||{})}</div>`);
+    const form=byId('singlePupilForm');
+    setTimeout(()=>byId('pupilFirstName')?.focus(),60);
+    form.onsubmit=async e=>{
+      e.preventDefault();
+      const firstName=byId('pupilFirstName').value.trim(),surname=byId('pupilSurname').value.trim();
+      if(!firstName||!surname){toast('Enter both first name and surname',true);return;}
+      const body={firstName,surname,sex:byId('pupilSex').value,examNo:byId('pupilExamNo').value.trim(),parentPhone:byId('pupilPhone').value.trim()};
+      const btn=e.submitter;btn.disabled=true;btn.textContent=pupil?'Saving…':'Adding…';
+      try{
+        await api(pupil?`/api/pupils/${encodeURIComponent(pupil.id)}`:'/api/pupils',{method:pupil?'PUT':'POST',body});
+        closeModal();toast(pupil?'Pupil updated':'Pupil added');await navigate('pupils');
+      }catch(err){toast(err.message,true);btn.disabled=false;btn.textContent=pupil?'Save Changes':'Save Pupil';}
+    };
+  }
+
+  async function removePupil(p){
+    if(!confirm(`Remove ${p.name} from this class?`))return;
+    try{await api(`/api/pupils/${encodeURIComponent(p.id)}`,{method:'DELETE'});toast('Pupil removed');await navigate('pupils');}catch(err){toast(err.message,true);}
+  }
+
+  function renderPupils(c){
+    const d=state.me, pupils=d.pupils||[];
+    const list=pupils.length?pupils.map((p,i)=>{const n=splitStoredName(p);return `<article class="pupil-row">
+      <div class="pupil-number">${i+1}</div>
+      <div class="pupil-name-block"><b>${esc(n.firstName)} ${esc(n.surname)}</b><span>${esc(p.examNo||'')}</span></div>
+      <div class="pupil-row-actions"><button class="icon-btn" type="button" data-edit-pupil="${p.id}" title="Edit pupil">✎</button><button class="icon-btn danger-icon" type="button" data-delete-pupil="${p.id}" title="Remove pupil">×</button></div>
+    </article>`}).join(''):`<div class="empty-pupils"><div class="empty-plus">＋</div><h3>No pupils added yet</h3><p>Tap <b>+ Add Pupil</b> and enter the learner's first name and surname.</p></div>`;
+    c.innerHTML=`<div class="page-head row-head pupils-head"><div><h2>Pupils</h2><p>${esc(d.class?.name||'Your class')} • ${pupils.length} ${pupils.length===1?'pupil':'pupils'}</p></div><button id="addPupil" class="btn primary add-pupil-btn" type="button"><span class="plus-symbol">＋</span> Add Pupil</button></div>
+      <div class="pupil-list">${list}</div>
+      ${pupils.length?'<button id="addAnotherPupil" class="btn ghost full add-another" type="button">＋ Add another pupil</button>':''}`;
+    byId('addPupil').onclick=()=>openPupilForm();
+    if(byId('addAnotherPupil'))byId('addAnotherPupil').onclick=()=>openPupilForm();
+    c.querySelectorAll('[data-edit-pupil]').forEach(b=>b.onclick=()=>openPupilForm(pupils.find(p=>p.id===b.dataset.editPupil)));
+    c.querySelectorAll('[data-delete-pupil]').forEach(b=>b.onclick=()=>removePupil(pupils.find(p=>p.id===b.dataset.deletePupil)));
+  }
+
+  function renderSetup(c){const d=state.me;const subjects=(d.subjects||[]).map(s=>s.name).join('\n');const grading=d.class?.gradingSystem==='CBC'?'CBC':'OBC';c.innerHTML=`<div class="page-head"><h2>Class Setup</h2><p>Set the class details, grading system and subjects. After saving, add pupils with the + button.</p></div><form id="setupForm" class="card stack">
     <label>School name<input id="schoolName" value="${esc(d.class?.schoolName||'')}"></label>
     <label>Class<input id="className" value="${esc(d.class?.name||'')}"></label>
     <label>Assessment name<input id="assessmentName" value="${esc(d.assessment?.name||'Current Assessment')}" placeholder="e.g. Term 2 Examination 2026"></label>
@@ -95,10 +145,10 @@
     <label>Subjects <span class="hint">One subject per line</span><textarea id="subjects" rows="10" placeholder="English\nMathematics\nScience">${esc(subjects)}</textarea></label>
     <button class="btn primary big" type="submit">Save Class Setup</button>
   </form>`;
-    byId('setupForm').onsubmit=async e=>{e.preventDefault();const subjects=byId('subjects').value.split(/\n/).map(x=>x.trim()).filter(Boolean);if(!subjects.length){toast('Enter at least one subject',true);return;}const pupils=(d.pupils||[]).map(p=>({name:p.name,sex:p.sex||'',examNo:p.examNo||'',parentPhone:p.parentPhone||''}));const btn=e.submitter;btn.disabled=true;btn.textContent='Saving…';try{state.me=await api('/api/setup',{method:'PUT',body:{schoolName:byId('schoolName').value,className:byId('className').value,assessmentName:byId('assessmentName').value,gradingSystem:byId('grading').value,subjects,pupils}});toast('Class setup saved');renderShell();navigate((state.me.pupils?.length||0)?'home':'pupils');}catch(err){toast(err.message,true)}finally{btn.disabled=false;btn.textContent='Save Class Setup';}};
+    byId('setupForm').onsubmit=async e=>{e.preventDefault();const subjects=byId('subjects').value.split(/\n/).map(x=>x.trim()).filter(Boolean);if(!subjects.length){toast('Enter at least one subject',true);return;}const btn=e.submitter;btn.disabled=true;btn.textContent='Saving…';try{state.me=await api('/api/setup',{method:'PUT',body:{schoolName:byId('schoolName').value,className:byId('className').value,assessmentName:byId('assessmentName').value,gradingSystem:byId('grading').value,subjects}});toast('Class setup saved');renderShell();navigate((state.me.pupils?.length||0)?'home':'pupils');}catch(err){toast(err.message,true)}finally{btn.disabled=false;btn.textContent='Save Class Setup';}};
   }
 
-  function renderResults(c){const d=state.me;if(!setupComplete()){c.innerHTML='<div class="notice">Add subjects in Class Setup and pupil names under Pupils first.</div>';return;}const heads=d.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('');const rows=d.pupils.map((p,i)=>`<tr><th class="pupil-cell"><span>${i+1}. ${esc(p.name)}</span><small>${esc(p.examNo||'')}</small></th>${d.subjects.map(s=>{const v=d.marks?.[p.id]?.[s.id];return `<td><input class="mark-box" data-pupil="${p.id}" data-subject="${s.id}" type="number" min="0" max="100" step="0.1" value="${v??''}" placeholder="—"></td>`}).join('')}</tr>`).join('');c.innerHTML=`<div class="page-head row-head"><div><h2>Enter Results</h2><p>${esc(d.assessment?.name||'Current Assessment')}</p></div><div id="saveState" class="save-state">✓ Saved</div></div><div class="marks-wrap"><table class="marks-table"><thead><tr><th class="pupil-cell">Pupil</th>${heads}</tr></thead><tbody>${rows}</tbody></table></div><p class="helper">Blank means no mark entered. Marks save automatically.</p>`;
+  function renderResults(c){const d=state.me;if(!setupComplete()){c.innerHTML='<div class="notice">Add subjects in Class Setup and add at least one pupil under Pupils first.</div>';return;}const heads=d.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('');const rows=d.pupils.map((p,i)=>`<tr><th class="pupil-cell"><span>${i+1}. ${esc(p.name)}</span><small>${esc(p.examNo||'')}</small></th>${d.subjects.map(s=>{const v=d.marks?.[p.id]?.[s.id];return `<td><input class="mark-box" data-pupil="${p.id}" data-subject="${s.id}" type="number" min="0" max="100" step="0.1" value="${v??''}" placeholder="—"></td>`}).join('')}</tr>`).join('');c.innerHTML=`<div class="page-head row-head"><div><h2>Enter Results</h2><p>${esc(d.assessment?.name||'Current Assessment')}</p></div><div id="saveState" class="save-state">✓ Saved</div></div><div class="marks-wrap"><table class="marks-table"><thead><tr><th class="pupil-cell">Pupil</th>${heads}</tr></thead><tbody>${rows}</tbody></table></div><p class="helper">Blank means no mark entered. Marks save automatically.</p>`;
     c.querySelectorAll('.mark-box').forEach(input=>input.addEventListener('input',()=>scheduleSave()));}
 
   function scheduleSave(){const status=byId('saveState');if(status){status.textContent='Saving…';status.classList.add('saving');}clearTimeout(state.saveTimer);state.saveTimer=setTimeout(saveResults,700);}
@@ -112,7 +162,7 @@
   function reportModel(d,p){const isCBC=d.class.gradingSystem==='CBC';const rows=d.subjects.map(s=>{const raw=d.marks?.[p.id]?.[s.id];const has=raw!==null&&raw!==undefined&&raw!==''&&Number.isFinite(Number(raw));const mark=has?Number(raw):null;const grade=has?(isCBC?gradeCBC(mark):gradeOBC(mark)):null;return{subject:s.name,mark,grade,remark:has?(isCBC?remarkCBC(grade):remarkOBC(grade)):'PENDING'};});const entered=rows.filter(r=>r.mark!==null),complete=entered.length===rows.length;let summary={complete,entered:entered.length,total:rows.length};if(complete&&isCBC&&entered.length)summary.average=Math.round(entered.reduce((n,x)=>n+x.mark,0)/entered.length*10)/10;if(complete&&!isCBC&&entered.length>=6){const best=[...entered].sort((a,b)=>b.mark-a.mark).slice(0,6);const points=best.reduce((n,x)=>n+x.grade,0);summary.best6=best.reduce((n,x)=>n+x.mark,0);summary.points=points;summary.division=points<=12?'I':points<=17?'II':points<=24?'III':points<=35?'IV':'FAIL';}return{rows,summary};}
   function teacherComment(d,p,m){const entered=m.rows.filter(x=>x.mark!==null).sort((a,b)=>b.mark-a.mark);if(!entered.length)return 'Results have not yet been entered.';const first=(p.name||'The learner').split(' ')[0],best=entered[0],weak=entered[entered.length-1];if(!m.summary.complete)return `${first}'s report is incomplete because some subject results are still pending.`;return `${first} performed best in ${best.subject}. More attention should be given to ${weak.subject}. Continued effort and regular revision are encouraged.`;}
 
-  function renderReports(c){const d=state.me;if(!setupComplete()){c.innerHTML='<div class="notice">Add subjects in Class Setup and pupil names under Pupils first.</div>';return;}const cards=d.pupils.map(p=>{const m=reportModel(d,p);return `<article class="report-card"><div><b>${esc(p.name)}</b><small>${esc(p.examNo||'No exam number')}</small><span class="status ${m.summary.complete?'ready':'pending'}">${m.summary.complete?'Ready for WhatsApp':`${m.summary.entered}/${m.summary.total} subjects`}</span></div><div class="report-actions"><button class="btn ghost" data-preview="${p.id}">Preview</button><button class="btn primary" data-pdf="${p.id}">PDF</button><button class="btn whatsapp" data-share="${p.id}">WhatsApp</button></div></article>`}).join('');c.innerHTML=`<div class="page-head row-head"><div><h2>Reports</h2><p>Each pupil report is prepared as a PDF ready to share on WhatsApp.</p></div><button id="allPdf" class="btn primary">Download All</button></div><div class="report-list">${cards}</div>`;c.querySelectorAll('[data-preview]').forEach(b=>b.onclick=()=>previewReport(b.dataset.preview));c.querySelectorAll('[data-pdf]').forEach(b=>b.onclick=()=>downloadOne(b.dataset.pdf));c.querySelectorAll('[data-share]').forEach(b=>b.onclick=()=>shareOne(b.dataset.share));byId('allPdf').onclick=downloadAll;}
+  function renderReports(c){const d=state.me;if(!setupComplete()){c.innerHTML='<div class="notice">Add subjects in Class Setup and add at least one pupil under Pupils first.</div>';return;}const cards=d.pupils.map(p=>{const m=reportModel(d,p);return `<article class="report-card"><div><b>${esc(p.name)}</b><small>${esc(p.examNo||'No exam number')}</small><span class="status ${m.summary.complete?'ready':'pending'}">${m.summary.complete?'Ready for WhatsApp':`${m.summary.entered}/${m.summary.total} subjects`}</span></div><div class="report-actions"><button class="btn ghost" data-preview="${p.id}">Preview</button><button class="btn primary" data-pdf="${p.id}">PDF</button><button class="btn whatsapp" data-share="${p.id}">WhatsApp</button></div></article>`}).join('');c.innerHTML=`<div class="page-head row-head"><div><h2>Reports</h2><p>Each pupil report is prepared as a PDF ready to share on WhatsApp.</p></div><button id="allPdf" class="btn primary">Download All</button></div><div class="report-list">${cards}</div>`;c.querySelectorAll('[data-preview]').forEach(b=>b.onclick=()=>previewReport(b.dataset.preview));c.querySelectorAll('[data-pdf]').forEach(b=>b.onclick=()=>downloadOne(b.dataset.pdf));c.querySelectorAll('[data-share]').forEach(b=>b.onclick=()=>shareOne(b.dataset.share));byId('allPdf').onclick=downloadAll;}
 
   function reportHtml(d,p){const m=reportModel(d,p);return `<div class="report-sheet"><div class="report-head"><div>REPUBLIC OF ZAMBIA<br><b>MINISTRY OF EDUCATION</b></div><h2>${esc(d.class.schoolName)}</h2><h3>PUPIL'S PROGRESS REPORT</h3>${!m.summary.complete?'<div class="incomplete">INCOMPLETE REPORT — SOME RESULTS PENDING</div>':''}</div><div class="meta"><span><b>Name:</b> ${esc(p.name)}</span><span><b>Class:</b> ${esc(d.class.name)}</span><span><b>Assessment:</b> ${esc(d.assessment.name)}</span><span><b>Grading:</b> ${esc(d.class.gradingSystem==='CBC'?'CBC':'OBC')}</span><span><b>Exam No:</b> ${esc(p.examNo||'—')}</span></div><table class="report-table"><thead><tr><th>Subject</th><th>Mark</th><th>Grade</th><th>Remark</th></tr></thead><tbody>${m.rows.map(r=>`<tr><td>${esc(r.subject)}</td><td>${r.mark??'—'}</td><td>${r.grade??'—'}</td><td>${esc(r.remark)}</td></tr>`).join('')}</tbody></table><div class="summary">${!m.summary.complete?`Subjects entered: <b>${m.summary.entered}/${m.summary.total}</b>`:d.class.gradingSystem==='CBC'?`Average: <b>${m.summary.average}%</b>`:`Best 6 Total: <b>${m.summary.best6}</b> • Points: <b>${m.summary.points}</b> • Division: <b>${m.summary.division}</b>`}</div><div class="comment"><b>Class Teacher's Comment</b><p>${esc(teacherComment(d,p,m))}</p></div><div class="teacher-line">Class Teacher: ${esc(d.user.name)}</div></div>`;}
 
