@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.0.2';
+const APP_VERSION = '3.0.3';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -87,6 +87,18 @@ for (const cls of db.classes || []) {
   if (String(cls.gradingSystem || '').toUpperCase() === 'LEGACY') { cls.gradingSystem = 'OBC'; gradingMigrated = true; }
 }
 if (gradingMigrated) saveDb();
+
+// V3.0.3 pupil-name migration: keep existing pupils and expose first name + surname.
+let pupilNameMigrated = false;
+for (const p of db.pupils || []) {
+  if (!p.firstName && !p.surname && p.name) {
+    const parts = String(p.name).trim().split(/\s+/).filter(Boolean);
+    p.firstName = parts.shift() || '';
+    p.surname = parts.join(' ');
+    pupilNameMigrated = true;
+  }
+}
+if (pupilNameMigrated) saveDb();
 
 function safeUser(u) {
   if (!u) return null;
@@ -191,7 +203,14 @@ async function api(req,res,urlObj) {
     const assessmentName=String(b.assessmentName||'').trim() || 'Current Assessment';
     const gradingSystem=normalizeGradingSystem(b.gradingSystem);
     const subjectNames=[...new Set((Array.isArray(b.subjects)?b.subjects:[]).map(x=>String(x||'').trim()).filter(Boolean))].slice(0,20);
-    const pupilRows=(Array.isArray(b.pupils)?b.pupils:[]).map(x=>({name:String(x.name||'').trim(),sex:String(x.sex||'').trim().toUpperCase().slice(0,1),examNo:String(x.examNo||'').trim(),parentPhone:String(x.parentPhone||'').trim()})).filter(x=>x.name).slice(0,120);
+    const hasPupilRows=Array.isArray(b.pupils);
+    const pupilRows=(hasPupilRows?b.pupils:[]).map(x=>{
+      let firstName=String(x.firstName||'').trim(), surname=String(x.surname||'').trim();
+      const legacyName=String(x.name||'').trim();
+      if(!firstName&&!surname&&legacyName){const parts=legacyName.split(/\s+/).filter(Boolean);firstName=parts.shift()||'';surname=parts.join(' ');}
+      const name=[firstName,surname].filter(Boolean).join(' ').trim()||legacyName;
+      return {firstName,surname,name,sex:String(x.sex||'').trim().toUpperCase().slice(0,1),examNo:String(x.examNo||'').trim(),parentPhone:String(x.parentPhone||'').trim()};
+    }).filter(x=>x.name).slice(0,120);
     if(!schoolName||!className) return sendError(res,400,'School and class names are required');
     cls.schoolName=schoolName; cls.name=className; cls.gradingSystem=gradingSystem; assessment.name=assessmentName;
 
@@ -200,11 +219,40 @@ async function api(req,res,urlObj) {
     const newSubjects=[];
     for(const name of subjectNames){ let s=subjectByName.get(name.toLowerCase()); if(!s){s={id:id('sub'),classId:cls.id,name,active:true};db.subjects.push(s);} s.name=name;s.active=true;newSubjects.push(s); }
 
-    const oldPupils=classPupils(cls.id); const pupilByKey=new Map(oldPupils.map(p=>[(p.examNo||p.name).toLowerCase(),p]));
-    for(const p of oldPupils) p.active=false;
-    const newPupils=[];
-    for(const row of pupilRows){ const key=(row.examNo||row.name).toLowerCase(); let p=pupilByKey.get(key); if(!p){p={id:id('p'),classId:cls.id,active:true};db.pupils.push(p);} Object.assign(p,row,{active:true});newPupils.push(p); }
+    if(hasPupilRows){
+      const oldPupils=classPupils(cls.id); const pupilByKey=new Map(oldPupils.map(p=>[(p.examNo||p.name).toLowerCase(),p]));
+      for(const p of oldPupils) p.active=false;
+      for(const row of pupilRows){ const key=(row.examNo||row.name).toLowerCase(); let p=pupilByKey.get(key); if(!p){p={id:id('p'),classId:cls.id,active:true};db.pupils.push(p);} Object.assign(p,row,{active:true}); }
+    }
     saveDb(); return sendJson(res,200,stateForUser(user));
+  }
+
+  if (req.method === 'POST' && pathname === '/api/pupils') {
+    const b=await readJson(req); const cls=userClass(user.id);
+    if(!cls) return sendError(res,404,'Class not found');
+    if(classPupils(cls.id).length>=120) return sendError(res,400,'This class already has the maximum of 120 pupils');
+    const firstName=String(b.firstName||'').trim(); const surname=String(b.surname||'').trim();
+    if(!firstName||!surname) return sendError(res,400,'Enter both first name and surname');
+    const pupil={id:id('p'),classId:cls.id,firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex:String(b.sex||'').trim().toUpperCase().slice(0,1),examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim(),active:true,createdAt:nowIso()};
+    db.pupils.push(pupil); saveDb(); return sendJson(res,201,{pupil,state:stateForUser(user)});
+  }
+
+  const pupilMatch=pathname.match(/^\/api\/pupils\/([^/]+)$/);
+  if (pupilMatch && req.method === 'PUT') {
+    const cls=userClass(user.id); if(!cls) return sendError(res,404,'Class not found');
+    const pupil=db.pupils.find(p=>p.id===decodeURIComponent(pupilMatch[1])&&p.classId===cls.id&&p.active!==false);
+    if(!pupil) return sendError(res,404,'Pupil not found');
+    const b=await readJson(req); const firstName=String(b.firstName||'').trim(); const surname=String(b.surname||'').trim();
+    if(!firstName||!surname) return sendError(res,400,'Enter both first name and surname');
+    Object.assign(pupil,{firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex:String(b.sex||'').trim().toUpperCase().slice(0,1),examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim()});
+    saveDb(); return sendJson(res,200,{pupil,state:stateForUser(user)});
+  }
+
+  if (pupilMatch && req.method === 'DELETE') {
+    const cls=userClass(user.id); if(!cls) return sendError(res,404,'Class not found');
+    const pupil=db.pupils.find(p=>p.id===decodeURIComponent(pupilMatch[1])&&p.classId===cls.id&&p.active!==false);
+    if(!pupil) return sendError(res,404,'Pupil not found');
+    pupil.active=false; pupil.removedAt=nowIso(); saveDb(); return sendJson(res,200,{removed:true,state:stateForUser(user)});
   }
 
   if (req.method === 'PUT' && pathname === '/api/results') {
