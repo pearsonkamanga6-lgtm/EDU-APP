@@ -1,18 +1,16 @@
 (() => {
-  const APP_VERSION='3.0.4';
+  const APP_VERSION='3.0.5';
   const app=document.getElementById('app');
-  const state={token:localStorage.getItem('reportform_token')||'',me:null,page:'home',saveTimer:null};
+  const state={me:null,page:'home',saveTimer:null};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
   const byId=id=>document.getElementById(id);
 
   async function api(path,opts={}){
     const headers={...(opts.headers||{})};
-    if(state.token) headers.Authorization=`Bearer ${state.token}`;
     if(opts.body) headers['Content-Type']='application/json';
     const body=opts.body&&typeof opts.body!=='string'?JSON.stringify(opts.body):opts.body;
     const res=await fetch(path,{...opts,headers,body,cache:'no-store'});
     const data=await res.json().catch(()=>({}));
-    if(res.status===401){localStorage.removeItem('reportform_token');state.token='';state.me=null;renderLogin();throw new Error(data.error||'Please sign in again');}
     if(!res.ok) throw new Error(data.error||`Request failed (${res.status})`);
     return data;
   }
@@ -23,54 +21,24 @@
     t.classList.toggle('bad',bad);t.textContent=message;t.style.display='block';clearTimeout(t._t);t._t=setTimeout(()=>t.style.display='none',2800);
   }
 
-  function renderLogin(){
-    app.innerHTML=`<div class="auth-page"><div class="auth-card">
-      <div class="brand-row"><div class="logo">RZ</div><div><h1>Reportform ZM</h1><p>Simple class teacher report app</p></div></div>
-      <div class="welcome-box"><b>Enter results. Generate reports. Send on WhatsApp.</b><span>CBC and OBC grading with pupil-by-pupil reports.</span></div>
-      <form id="loginForm" class="stack">
-        <label>Staff ID / Username<input id="loginId" autocomplete="username" placeholder="e.g. kamanga" required></label>
-        <label>PIN<input id="loginPin" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="current-password" placeholder="At least 4 numbers" required></label>
-        <button class="btn primary big" type="submit">Sign in</button>
-      </form>
-      <button id="showRegister" class="btn ghost full" type="button">Create class teacher account</button>
-      <p class="micro">Your PIN can be numbers only, with a minimum of 4 digits.</p>
-    </div></div>`;
-    byId('showRegister').onclick=renderRegister;
-    byId('loginForm').onsubmit=async e=>{e.preventDefault();const pin=byId('loginPin').value.trim();if(!/^\d{4,}$/.test(pin)){toast('PIN must be at least 4 numbers',true);return;}const btn=e.submitter;btn.disabled=true;btn.textContent='Opening…';try{const d=await api('/api/login',{method:'POST',body:{identifier:byId('loginId').value,pin}});state.token=d.token;localStorage.setItem('reportform_token',state.token);await bootstrap();}catch(err){toast(err.message,true)}finally{btn.disabled=false;btn.textContent='Sign in';}};
-  }
-
-  function renderRegister(){
-    app.innerHTML=`<div class="auth-page"><div class="auth-card wide-auth">
-      <button class="back-link" id="backLogin">← Back</button>
-      <div class="brand-row"><div class="logo">RZ</div><div><h1>Create account</h1><p>Class teacher only</p></div></div>
-      <form id="registerForm" class="stack">
-        <label>Full name<input id="regName" placeholder="e.g. Pearson Kamanga" required></label>
-        <label>Staff ID / Username<input id="regId" placeholder="e.g. kamanga" required></label>
-        <label>School name<input id="regSchool" value="Lumezi Boarding Secondary School" required></label>
-        <label>Class<input id="regClass" placeholder="e.g. 12L" required></label>
-        <label>Grading system<select id="regGrade"><option value="CBC">CBC (Grades 1–5)</option><option value="OBC">OBC (Grades 1–9)</option></select></label>
-        <label>PIN<input id="regPin" type="password" inputmode="numeric" pattern="[0-9]*" placeholder="At least 4 numbers" required></label>
-        <label>Confirm PIN<input id="regPin2" type="password" inputmode="numeric" pattern="[0-9]*" placeholder="Repeat PIN" required></label>
-        <button class="btn primary big" type="submit">Create account</button>
-      </form>
-    </div></div>`;
-    byId('backLogin').onclick=renderLogin;
-    byId('registerForm').onsubmit=async e=>{e.preventDefault();const p=byId('regPin').value.trim(),p2=byId('regPin2').value.trim();if(!/^\d{4,}$/.test(p)){toast('PIN must contain numbers only and be at least 4 digits',true);return;}if(p!==p2){toast('PINs do not match',true);return;}const btn=e.submitter;btn.disabled=true;btn.textContent='Creating…';try{const d=await api('/api/register',{method:'POST',body:{name:byId('regName').value,identifier:byId('regId').value,pin:p,schoolName:byId('regSchool').value,className:byId('regClass').value,gradingSystem:byId('regGrade').value}});state.token=d.token;localStorage.setItem('reportform_token',state.token);await bootstrap();}catch(err){toast(err.message,true)}finally{btn.disabled=false;btn.textContent='Create account';}};
+  function profileComplete(){
+    const d=state.me;
+    return !!(String(d?.class?.teacherName||d?.user?.name||'').trim() && String(d?.class?.teacherPhone||d?.user?.phone||'').trim() && String(d?.class?.schoolName||'').trim() && String(d?.class?.name||'').trim());
   }
 
   async function bootstrap(){
-    state.me=await api('/api/me');
+    state.me=await api('/api/class-data');
     renderShell();
-    const first=(state.me?.subjects?.length||0)===0?'subjects':(state.me?.pupils?.length||0)===0?'pupils':'home';
+    const first=!profileComplete()?'setup':(state.me?.subjects?.length||0)===0?'subjects':(state.me?.pupils?.length||0)===0?'pupils':'home';
     navigate(first);
   }
   function setupComplete(){return (state.me?.subjects?.length||0)>0&&(state.me?.pupils?.length||0)>0;}
 
   function renderShell(){
     const d=state.me;
-    app.innerHTML=`<div class="shell"><header class="topbar"><div><div class="app-title">Reportform ZM</div><div class="subtle">${esc(d.class?.name||'My Class')} • ${esc(d.user?.name||'')}</div></div><button id="signout" class="btn ghost">Sign out</button></header><main id="content" class="content"></main><nav class="bottom-nav"><button data-nav="home">⌂<span>Home</span></button><button data-nav="pupils">👥<span>Pupils</span></button><button data-nav="results">✎<span>Results</span></button><button data-nav="reports">▤<span>Reports</span></button></nav></div>`;
+    const teacher=d?.class?.teacherName||d?.user?.name||'';
+    app.innerHTML=`<div class="shell"><header class="topbar"><div><div class="app-title">Reportform ZM</div><div class="subtle">${esc(d.class?.name||'My Class')}${teacher?` • ${esc(teacher)}`:''}</div></div></header><main id="content" class="content"></main><nav class="bottom-nav"><button data-nav="home">⌂<span>Home</span></button><button data-nav="pupils">👥<span>Pupils</span></button><button data-nav="results">✎<span>Results</span></button><button data-nav="reports">▤<span>Reports</span></button></nav></div>`;
     document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>navigate(b.dataset.nav));
-    byId('signout').onclick=()=>{state.token='';state.me=null;localStorage.removeItem('reportform_token');renderLogin();};
   }
 
   async function refresh(){state.me=await api('/api/class-data');}
@@ -199,16 +167,22 @@
 
   function renderSetup(c){
     const d=state.me,grading=d.class?.gradingSystem==='CBC'?'CBC':'OBC';
-    c.innerHTML=`<div class="page-head"><h2>Class Setup</h2><p>Set the school, class, assessment and grading system. Subjects are added separately with the + button.</p></div><form id="setupForm" class="card stack">
-      <label>School name<input id="schoolName" value="${esc(d.class?.schoolName||'')}"></label>
-      <label>Class<input id="className" value="${esc(d.class?.name||'')}"></label>
+    const teacherName=d.class?.teacherName||d.user?.name||'';
+    const teacherPhone=d.class?.teacherPhone||d.user?.phone||'';
+    c.innerHTML=`<div class="page-head"><h2>Class Setup</h2><p>Enter the class teacher details once, then set the school, class, assessment and grading system.</p></div><form id="setupForm" class="card stack">
+      <div class="teacher-details-box"><h3>Class Teacher</h3><div class="teacher-grid">
+        <label>Class teacher name<input id="teacherName" value="${esc(teacherName)}" placeholder="e.g. Pearson Kamanga" autocomplete="name" required></label>
+        <label>Phone number<input id="teacherPhone" value="${esc(teacherPhone)}" placeholder="e.g. 0973731979" inputmode="tel" autocomplete="tel" required></label>
+      </div></div>
+      <label>School name<input id="schoolName" value="${esc(d.class?.schoolName||'')}" required></label>
+      <label>Class<input id="className" value="${esc(d.class?.name||'')}" placeholder="e.g. 10L" required></label>
       <label>Assessment name<input id="assessmentName" value="${esc(d.assessment?.name||'Current Assessment')}" placeholder="e.g. Term 2 Examination 2026"></label>
       <label>Grading system<select id="grading"><option value="CBC" ${grading==='CBC'?'selected':''}>CBC (Grades 1–5)</option><option value="OBC" ${grading==='OBC'?'selected':''}>OBC (Grades 1–9)</option></select></label>
       <div class="setup-subject-link"><div><b>${d.subjects?.length||0} subjects added</b><span>Add, edit or remove subjects one by one.</span></div><button id="manageSubjects" class="btn ghost" type="button">＋ Subjects</button></div>
       <button class="btn primary big" type="submit">Save Class Setup</button>
     </form>`;
     byId('manageSubjects').onclick=()=>navigate('subjects');
-    byId('setupForm').onsubmit=async e=>{e.preventDefault();const btn=e.submitter;btn.disabled=true;btn.textContent='Saving…';try{state.me=await api('/api/setup',{method:'PUT',body:{schoolName:byId('schoolName').value,className:byId('className').value,assessmentName:byId('assessmentName').value,gradingSystem:byId('grading').value}});toast('Class setup saved');renderShell();navigate((state.me.subjects?.length||0)?((state.me.pupils?.length||0)?'home':'pupils'):'subjects');}catch(err){toast(err.message,true)}finally{btn.disabled=false;btn.textContent='Save Class Setup';}};
+    byId('setupForm').onsubmit=async e=>{e.preventDefault();const btn=e.submitter;btn.disabled=true;btn.textContent='Saving…';try{state.me=await api('/api/setup',{method:'PUT',body:{teacherName:byId('teacherName').value,teacherPhone:byId('teacherPhone').value,schoolName:byId('schoolName').value,className:byId('className').value,assessmentName:byId('assessmentName').value,gradingSystem:byId('grading').value}});toast('Class setup saved');renderShell();navigate((state.me.subjects?.length||0)?((state.me.pupils?.length||0)?'home':'pupils'):'subjects');}catch(err){toast(err.message,true)}finally{btn.disabled=false;btn.textContent='Save Class Setup';}};
   }
 
   function renderResults(c){
@@ -290,7 +264,7 @@
       <div class="report-table-wrap"><table class="report-table old-report-table"><thead><tr><th>SUBJECT</th><th>TOTAL SAT</th><th>MARK (%)</th><th>GRADE</th><th>PTS</th><th>AV</th><th>COMMENT</th></tr></thead><tbody>${m.rows.map((r,i)=>`<tr class="${i%2?'alt':''}"><td>${esc(String(r.subject).toUpperCase())}</td><td>${r.totalSat}</td><td class="grade-mark">${r.mark??'—'}</td><td class="grade-mark">${r.grade??'—'}</td><td>${r.points??'—'}</td><td>${r.average??'—'}</td><td>${esc(r.remark)}</td></tr>`).join('')}</tbody></table></div>
       <div class="old-summary">${!m.summary.complete?`RESULT STATUS: <b>INCOMPLETE (${m.summary.entered}/${m.summary.total} subjects entered)</b>`:d.class.gradingSystem==='CBC'?`OVERALL AVERAGE: <b>${m.summary.average}%</b><span>CBC AVERAGE GRADE: <b>Grade ${m.summary.averageGrade} — ${esc(remarkCBC(m.summary.averageGrade))}</b></span>`:`TOTAL MARKS (Best 6): <b>${m.summary.best6}/600</b><span>GRADE POINTS: <b>${m.summary.points}</b> • DIVISION: <b>${esc(m.summary.division)}</b></span>`}</div>
       <div class="old-comment"><b>Class Teacher's Comment:</b><p>${esc(comment)}</p></div>
-      <div class="old-signatures"><div><span>${esc(d.user.name||'')}</span><i></i><small>Class Teacher</small></div><div><span>&nbsp;</span><i></i><small>Date</small></div></div>
+      <div class="old-signatures"><div><span>${esc(d.class?.teacherName||d.user?.name||'')}</span><i></i><small>Class Teacher${d.class?.teacherPhone?` • ${esc(d.class.teacherPhone)}`:''}</small></div><div><span>&nbsp;</span><i></i><small>Date</small></div></div>
       <div class="report-footer">Reportform ZM • ${esc(d.class.gradingSystem)} grading</div>
     </div>`;
   }
@@ -334,7 +308,7 @@
     else if(d.class.gradingSystem==='CBC'){doc.text(`OVERALL AVERAGE: ${m.summary.average}%`,12,y);const rightText=`CBC AVG GRADE: Grade ${m.summary.averageGrade} - ${remarkCBC(m.summary.averageGrade)}`;doc.text(rightText,198-doc.getTextWidth(rightText),y);}
     else{doc.text(`TOTAL MARKS (Best 6): ${m.summary.best6} / 600`,12,y);const rightText=`POINTS: ${m.summary.points}   DIVISION: ${m.summary.division}`;doc.text(rightText,198-doc.getTextWidth(rightText),y);}
     y+=7;doc.setDrawColor(180);doc.line(12,y,198,y);y+=6;doc.setFont('helvetica','bold');doc.setFontSize(9);doc.text("Class Teacher's Comment:",12,y);y+=5;doc.setFont('helvetica','normal');doc.setFontSize(8.6);const lines=doc.splitTextToSize(teacherComment(d,p,m),186);doc.text(lines.slice(0,13),12,y);y+=Math.min(lines.length,13)*4+6;
-    doc.setFontSize(8);doc.text(String(d.user.name||''),15,Math.min(y,259));const sy=Math.min(y+3,262);doc.setDrawColor(0);doc.line(15,sy,78,sy);doc.line(120,sy,180,sy);doc.text('Class Teacher',15,sy+4);doc.text('Date',120,sy+4);
+    doc.setFontSize(8);doc.text(String(d.class?.teacherName||d.user?.name||''),15,Math.min(y,257));if(d.class?.teacherPhone){doc.setFontSize(7.2);doc.setTextColor(80);doc.text(String(d.class.teacherPhone),15,Math.min(y+3.5,260));doc.setTextColor(0);}const sy=Math.min(y+6,263);doc.setDrawColor(0);doc.line(15,sy,78,sy);doc.line(120,sy,180,sy);doc.text('Class Teacher',15,sy+4);doc.text('Date',120,sy+4);
     doc.setFontSize(7.5);doc.setTextColor(80);doc.text(`Reportform ZM • ${d.class.gradingSystem} • ${pageNo}`,198,280,{align:'right'});
   }
 
@@ -344,5 +318,5 @@
   function normalizeWhatsAppPhone(value){let x=String(value||'').replace(/\D/g,'');if(x.startsWith('00'))x=x.slice(2);if(x.startsWith('0'))x='260'+x.slice(1);return x;}
   async function shareOne(id){const p=state.me.pupils.find(x=>x.id===id);if(!p)return;try{const doc=await buildDoc([p]),blob=doc.output('blob'),file=new File([blob],`${state.me.class.name}_${p.name.replace(/\s+/g,'_')}.pdf`,{type:'application/pdf'}),message=`${state.me.class.schoolName} — ${state.me.assessment.name} report for ${p.name}.`;if(navigator.share&&(!navigator.canShare||navigator.canShare({files:[file]}))){await navigator.share({files:[file],title:`${p.name} - Pupil Report`,text:message});return;}doc.save(file.name);const phone=normalizeWhatsAppPhone(p.parentPhone),url=`https://wa.me/${phone}?text=${encodeURIComponent(message+' The PDF has been downloaded; please attach it to this WhatsApp message.')}`;const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';document.body.appendChild(link);link.click();link.remove();toast('PDF downloaded. WhatsApp opened — attach the downloaded report.');}catch(e){if(e.name!=='AbortError')toast(e.message,true);}}
 
-  if(state.token)bootstrap().catch(()=>renderLogin());else renderLogin();
+  bootstrap().catch(err=>{app.innerHTML=`<div class="auth-page"><div class="auth-card"><h2>Reportform ZM could not open</h2><p>${esc(err.message||err)}</p><button class="btn primary full" onclick="location.reload()">Try again</button></div></div>`;});
 })();
