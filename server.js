@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '3.0.1';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -21,6 +21,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 const nowIso = () => new Date().toISOString();
 const id = prefix => `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
 const validPin = pin => /^\d{4,}$/.test(String(pin || '').trim());
+const normalizeGradingSystem = value => ['OBC','LEGACY'].includes(String(value || '').trim().toUpperCase()) ? 'OBC' : 'CBC';
 
 function hashPin(pin) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -79,6 +80,13 @@ function saveDb() {
   fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
   fs.renameSync(tmp, DATA_FILE);
 }
+
+// V3.0.1 terminology migration: the former LEGACY option is now called OBC.
+let gradingMigrated = false;
+for (const cls of db.classes || []) {
+  if (String(cls.gradingSystem || '').toUpperCase() === 'LEGACY') { cls.gradingSystem = 'OBC'; gradingMigrated = true; }
+}
+if (gradingMigrated) saveDb();
 
 function safeUser(u) {
   if (!u) return null;
@@ -148,7 +156,7 @@ async function api(req,res,urlObj) {
     const pin = String(b.pin||'').trim();
     const schoolName = String(b.schoolName||'').trim();
     const className = String(b.className||'').trim();
-    const gradingSystem = String(b.gradingSystem||'CBC').toUpperCase()==='LEGACY'?'LEGACY':'CBC';
+    const gradingSystem = normalizeGradingSystem(b.gradingSystem);
     if (!name || !identifier || !schoolName || !className) return sendError(res,400,'Complete all required fields');
     if (!validPin(pin)) return sendError(res,400,'PIN must contain numbers only and be at least 4 digits');
     if (db.users.some(u => u.identifier === identifier)) return sendError(res,409,'That staff ID is already in use');
@@ -181,7 +189,7 @@ async function api(req,res,urlObj) {
     if (!cls || !assessment) return sendError(res,404,'Class not found');
     const schoolName=String(b.schoolName||'').trim(); const className=String(b.className||'').trim();
     const assessmentName=String(b.assessmentName||'').trim() || 'Current Assessment';
-    const gradingSystem=String(b.gradingSystem||'CBC').toUpperCase()==='LEGACY'?'LEGACY':'CBC';
+    const gradingSystem=normalizeGradingSystem(b.gradingSystem);
     const subjectNames=[...new Set((Array.isArray(b.subjects)?b.subjects:[]).map(x=>String(x||'').trim()).filter(Boolean))].slice(0,20);
     const pupilRows=(Array.isArray(b.pupils)?b.pupils:[]).map(x=>({name:String(x.name||'').trim(),sex:String(x.sex||'').trim().toUpperCase().slice(0,1),examNo:String(x.examNo||'').trim(),parentPhone:String(x.parentPhone||'').trim()})).filter(x=>x.name).slice(0,120);
     if(!schoolName||!className) return sendError(res,400,'School and class names are required');
