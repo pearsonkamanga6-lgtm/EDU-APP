@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.0.5';
+const APP_VERSION = '3.0.6';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -25,6 +25,10 @@ const nowIso = () => new Date().toISOString();
 const id = prefix => `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
 const validPin = pin => /^\d{4,}$/.test(String(pin || '').trim());
 const normalizeGradingSystem = value => ['OBC','LEGACY'].includes(String(value || '').trim().toUpperCase()) ? 'OBC' : 'CBC';
+const ASSESSMENT_NAMES = ['Week 4 Assessment','Week 8 Assessment','End of Term Test'];
+const normalizeAssessmentName = value => ASSESSMENT_NAMES.includes(String(value||'').trim()) ? String(value).trim() : 'Week 4 Assessment';
+const normalizeTerm = value => ['Term 1','Term 2','Term 3'].includes(String(value||'').trim()) ? String(value).trim() : 'Term 1';
+const normalizeAcademicYear = value => { const n=Number(value); return Number.isInteger(n)&&n>=2020&&n<=2100 ? String(n) : String(new Date().getFullYear()); };
 
 function hashPin(pin) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -131,7 +135,20 @@ function authUser(req) {
 }
 
 function userClass(userId) { return db.classes.find(c => c.teacherUserId === userId) || null; }
-function userAssessment(userId) { const c=userClass(userId); return c ? db.assessments.find(a=>a.classId===c.id) || null : null; }
+function userAssessment(userId) {
+  const c=userClass(userId); if(!c) return null;
+  if(c.activeAssessmentId){const byId=db.assessments.find(a=>a.id===c.activeAssessmentId&&a.classId===c.id);if(byId)return byId;}
+  const desired=String(c.activeAssessmentName||'').trim(),term=normalizeTerm(c.term),year=normalizeAcademicYear(c.academicYear);
+  if(desired){const hit=db.assessments.find(a=>a.classId===c.id&&a.name===desired&&normalizeTerm(a.term)===term&&normalizeAcademicYear(a.academicYear)===year);if(hit)return hit;}
+  return db.assessments.find(a=>a.classId===c.id) || null;
+}
+function ensureAssessment(cls,name,term=cls.term,academicYear=cls.academicYear){
+  const assessmentName=normalizeAssessmentName(name),assessmentTerm=normalizeTerm(term),assessmentYear=normalizeAcademicYear(academicYear);
+  let a=db.assessments.find(x=>x.classId===cls.id&&x.name===assessmentName&&normalizeTerm(x.term)===assessmentTerm&&normalizeAcademicYear(x.academicYear)===assessmentYear);
+  if(!a){a={id:id('assess'),classId:cls.id,name:assessmentName,term:assessmentTerm,academicYear:assessmentYear,createdAt:nowIso()};db.assessments.push(a);}
+  a.term=assessmentTerm;a.academicYear=assessmentYear;cls.activeAssessmentId=a.id;cls.activeAssessmentName=assessmentName;
+  return a;
+}
 function classSubjects(classId) { return db.subjects.filter(s => s.classId === classId && s.active !== false); }
 function classPupils(classId) { return db.pupils.filter(p => p.classId === classId && p.active !== false); }
 function markKey(assessmentId,pupilId,subjectId){ return `${assessmentId}:${pupilId}:${subjectId}`; }
@@ -145,14 +162,27 @@ function standaloneUser(){
   }
   let cls=userClass(user.id);
   if(!cls){
-    cls={id:id('cls'),teacherUserId:user.id,teacherName:user.name||'',teacherPhone:user.phone||'',schoolName:'',name:'',gradingSystem:'CBC',createdAt:nowIso()};
+    cls={id:id('cls'),teacherUserId:user.id,teacherName:user.name||'',teacherPhone:user.phone||'',schoolName:'',name:'',gradingSystem:'CBC',term:'Term 1',academicYear:String(new Date().getFullYear()),activeAssessmentName:'Week 4 Assessment',createdAt:nowIso()};
     db.classes.push(cls);changed=true;
   } else {
     if(cls.teacherName===undefined){cls.teacherName=user.name||'';changed=true;}
     if(cls.teacherPhone===undefined){cls.teacherPhone=user.phone||'';changed=true;}
+    if(!cls.term){cls.term='Term 1';changed=true;}
+    if(!cls.academicYear){cls.academicYear=String(new Date().getFullYear());changed=true;}
+  }
+  const existing=db.assessments.filter(a=>a.classId===cls.id);
+  for(const a of existing){if(!a.term){a.term=cls.term;changed=true;}if(!a.academicYear){a.academicYear=cls.academicYear;changed=true;}}
+  if(existing.length===1 && !ASSESSMENT_NAMES.includes(existing[0].name)){
+    existing[0].name='Week 4 Assessment';cls.activeAssessmentId=existing[0].id;cls.activeAssessmentName='Week 4 Assessment';changed=true;
   }
   let assessment=userAssessment(user.id);
-  if(!assessment){db.assessments.push({id:id('assess'),classId:cls.id,name:'Current Assessment',createdAt:nowIso()});changed=true;}
+  if(!assessment || !ASSESSMENT_NAMES.includes(assessment.name)){
+    assessment=ensureAssessment(cls,'Week 4 Assessment');changed=true;
+  } else if(!cls.activeAssessmentId){cls.activeAssessmentId=assessment.id;cls.activeAssessmentName=assessment.name;changed=true;}
+  for(const p of classPupils(cls.id)){
+    if(!p.comments || typeof p.comments!=='object'){p.comments={};changed=true;}
+    if(p.classTeacherComment && Object.keys(p.comments).length===0){p.comments[assessment.id]=String(p.classTeacherComment);p.classTeacherComment='';changed=true;}
+  }
   if(changed)saveDb();
   return user;
 }
@@ -186,9 +216,9 @@ function pupilReportSnapshot(user,pupil){
   const weakest=[...entered].sort((a,b)=>a.mark-b.mark).slice(0,3);
   const summary={complete,entered:entered.length,total:rows.length};
   if(entered.length){summary.average=Math.round(entered.reduce((n,x)=>n+x.mark,0)/entered.length*10)/10;}
-  if(!isCBC&&entered.length>=6){const best=[...entered].sort((a,b)=>b.mark-a.mark).slice(0,6);summary.best6=best.reduce((n,x)=>n+x.mark,0);summary.points=best.reduce((n,x)=>n+x.grade,0);summary.division=summary.points<=12?'I':summary.points<=17?'II':summary.points<=24?'III':summary.points<=35?'IV':'FAIL';}
+  if(!isCBC&&entered.length){const best=[...entered].sort((a,b)=>b.mark-a.mark).slice(0,6);summary.best6Count=best.length;summary.best6=best.reduce((n,x)=>n+x.mark,0);summary.points=best.reduce((n,x)=>n+x.grade,0);if(best.length>=6)summary.division=summary.points<=12?'I':summary.points<=17?'II':summary.points<=24?'III':summary.points<=35?'IV':'FAIL';}
   if(isCBC&&entered.length)summary.averageGrade=gradeCBC(summary.average);
-  return {school:cls.schoolName,className:cls.name,assessment:assessment.name,gradingSystem:cls.gradingSystem,pupil:{name:pupil.name,firstName:pupil.firstName,surname:pupil.surname,sex:pupil.sex,examNo:pupil.examNo},rows,summary,strongest,weakest,missing:rows.filter(r=>r.mark===null).map(r=>r.subject)};
+  return {school:cls.schoolName,className:cls.name,term:cls.term,academicYear:cls.academicYear,assessment:assessment.name,gradingSystem:cls.gradingSystem,pupil:{name:pupil.name,firstName:pupil.firstName,surname:pupil.surname,sex:pupil.sex,examNo:pupil.examNo},rows,summary,strongest,weakest,missing:rows.filter(r=>r.mark===null).map(r=>r.subject)};
 }
 
 function smartLocalComment(snapshot){
@@ -206,7 +236,7 @@ function smartLocalComment(snapshot){
     const g=gradeCBC(summary.average), desc=remarkCBC(g);
     text+=`${pr.subj} obtained an overall average of ${summary.average}%, which is CBC Grade ${g} (${desc}). `;
   }else{
-    text+=`${pr.subj} recorded a Best 6 total of ${summary.best6}/600, ${summary.points} grade points and Division ${summary.division}. `;
+    if(summary.best6Count>=6)text+=`${pr.subj} recorded a Best 6 total of ${summary.best6}/600, ${summary.points} grade points and Division ${summary.division}. `;else text+=`${pr.subj} obtained an average of ${summary.average}% across the ${summary.entered} entered subjects. `;
   }
   if(best) text+=`${pr.subj} performed strongest in ${best.subject} with ${best.mark}%. `;
   if(weak && (!best || weak.subject!==best.subject)){
@@ -240,15 +270,16 @@ function stateForUser(user) {
   const cls = userClass(user.id);
   const assessment = userAssessment(user.id);
   const subjects = cls ? classSubjects(cls.id) : [];
-  const pupils = cls ? classPupils(cls.id) : [];
+  const sourcePupils = cls ? classPupils(cls.id) : [];
+  const pupils = sourcePupils.map(p=>({...p,classTeacherComment:assessment?String(p.comments?.[assessment.id]||''):''}));
   const marks = {};
   if (assessment) {
-    for (const p of pupils) {
+    for (const p of sourcePupils) {
       marks[p.id] = {};
       for (const s of subjects) marks[p.id][s.id] = db.marks[markKey(assessment.id,p.id,s.id)] ?? null;
     }
   }
-  return { version:APP_VERSION, user:safeUser(user), class:cls, assessment, subjects, pupils, marks, ai:{onlineConfigured:!!OPENAI_API_KEY} };
+  return { version:APP_VERSION, user:safeUser(user), class:cls, assessment, assessmentOptions:ASSESSMENT_NAMES, subjects, pupils, marks, ai:{onlineConfigured:!!OPENAI_API_KEY} };
 }
 
 async function api(req,res,urlObj) {
@@ -267,8 +298,8 @@ async function api(req,res,urlObj) {
     if (!validPin(pin)) return sendError(res,400,'PIN must contain numbers only and be at least 4 digits');
     if (db.users.some(u => u.identifier === identifier)) return sendError(res,409,'That staff ID is already in use');
     const user = { id:id('usr'), name, identifier, pinHash:hashPin(pin), active:true, createdAt:nowIso() };
-    const cls = { id:id('cls'), teacherUserId:user.id, schoolName, name:className, gradingSystem, createdAt:nowIso() };
-    const assessment = { id:id('assess'), classId:cls.id, name:'Current Assessment', createdAt:nowIso() };
+    const cls = { id:id('cls'), teacherUserId:user.id, schoolName, name:className, gradingSystem, term:'Term 1', academicYear:String(new Date().getFullYear()), activeAssessmentName:'Week 4 Assessment', createdAt:nowIso() };
+    const assessment = { id:id('assess'), classId:cls.id, name:'Week 4 Assessment', term:'Term 1', academicYear:String(new Date().getFullYear()), createdAt:nowIso() }; cls.activeAssessmentId=assessment.id;
     db.users.push(user); db.classes.push(cls); db.assessments.push(assessment); saveDb();
     return sendJson(res,201,{ token:issueToken(user.id), user:safeUser(user) });
   }
@@ -307,15 +338,17 @@ async function api(req,res,urlObj) {
 
   if (req.method === 'PUT' && pathname === '/api/setup') {
     const b = await readJson(req);
-    const cls = userClass(user.id); const assessment = userAssessment(user.id);
-    if (!cls || !assessment) return sendError(res,404,'Class not found');
+    const cls = userClass(user.id);
+    if (!cls) return sendError(res,404,'Class not found');
     const teacherName=String(b.teacherName||'').trim(); const teacherPhone=String(b.teacherPhone||'').trim();
     const schoolName=String(b.schoolName||'').trim(); const className=String(b.className||'').trim();
-    const assessmentName=String(b.assessmentName||'').trim() || 'Current Assessment';
+    const assessmentName=normalizeAssessmentName(b.assessmentName);
     const gradingSystem=normalizeGradingSystem(b.gradingSystem);
+    const term=normalizeTerm(b.term); const academicYear=normalizeAcademicYear(b.academicYear);
     if(!teacherName||!teacherPhone||!schoolName||!className) return sendError(res,400,'Class teacher name, phone number, school and class are required');
     user.name=teacherName; user.phone=teacherPhone; cls.teacherName=teacherName; cls.teacherPhone=teacherPhone;
-    cls.schoolName=schoolName; cls.name=className; cls.gradingSystem=gradingSystem; assessment.name=assessmentName;
+    cls.schoolName=schoolName; cls.name=className; cls.gradingSystem=gradingSystem; cls.term=term; cls.academicYear=academicYear;
+    ensureAssessment(cls,assessmentName);
 
     // Backward-compatible support for older V3 clients that still submit a subject array.
     if(Array.isArray(b.subjects)){
@@ -374,9 +407,10 @@ async function api(req,res,urlObj) {
     const b=await readJson(req); const cls=userClass(user.id);
     if(!cls) return sendError(res,404,'Class not found');
     if(classPupils(cls.id).length>=120) return sendError(res,400,'This class already has the maximum of 120 pupils');
-    const firstName=String(b.firstName||'').trim(); const surname=String(b.surname||'').trim();
+    const firstName=String(b.firstName||'').trim(); const surname=String(b.surname||'').trim(); const sex=String(b.sex||'').trim().toUpperCase().slice(0,1);
     if(!firstName||!surname) return sendError(res,400,'Enter both first name and surname');
-    const pupil={id:id('p'),classId:cls.id,firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex:String(b.sex||'').trim().toUpperCase().slice(0,1),examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim(),classTeacherComment:'',active:true,createdAt:nowIso()};
+    if(!['F','M'].includes(sex)) return sendError(res,400,'Select the pupil sex: Male or Female');
+    const pupil={id:id('p'),classId:cls.id,firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex,examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim(),classTeacherComment:'',comments:{},active:true,createdAt:nowIso()};
     db.pupils.push(pupil); saveDb(); return sendJson(res,201,{pupil,state:stateForUser(user)});
   }
 
@@ -385,7 +419,8 @@ async function api(req,res,urlObj) {
     const cls=userClass(user.id);if(!cls)return sendError(res,404,'Class not found');
     const pupil=db.pupils.find(p=>p.id===decodeURIComponent(pupilCommentMatch[1])&&p.classId===cls.id&&p.active!==false);
     if(!pupil)return sendError(res,404,'Pupil not found');
-    const b=await readJson(req);pupil.classTeacherComment=String(b.comment||'').trim().slice(0,4000);saveDb();return sendJson(res,200,{saved:true,comment:pupil.classTeacherComment,state:stateForUser(user)});
+    const assessment=userAssessment(user.id);if(!assessment)return sendError(res,404,'Assessment not found');
+    const b=await readJson(req);const comment=String(b.comment||'').trim().slice(0,4000);pupil.comments=(pupil.comments&&typeof pupil.comments==='object')?pupil.comments:{};pupil.comments[assessment.id]=comment;pupil.classTeacherComment='';saveDb();return sendJson(res,200,{saved:true,comment,state:stateForUser(user)});
   }
 
   const pupilMatch=pathname.match(/^\/api\/pupils\/([^/]+)$/);
@@ -393,9 +428,10 @@ async function api(req,res,urlObj) {
     const cls=userClass(user.id); if(!cls) return sendError(res,404,'Class not found');
     const pupil=db.pupils.find(p=>p.id===decodeURIComponent(pupilMatch[1])&&p.classId===cls.id&&p.active!==false);
     if(!pupil) return sendError(res,404,'Pupil not found');
-    const b=await readJson(req); const firstName=String(b.firstName||'').trim(); const surname=String(b.surname||'').trim();
+    const b=await readJson(req); const firstName=String(b.firstName||'').trim(); const surname=String(b.surname||'').trim(); const sex=String(b.sex||'').trim().toUpperCase().slice(0,1);
     if(!firstName||!surname) return sendError(res,400,'Enter both first name and surname');
-    Object.assign(pupil,{firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex:String(b.sex||'').trim().toUpperCase().slice(0,1),examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim()});
+    if(!['F','M'].includes(sex)) return sendError(res,400,'Select the pupil sex: Male or Female');
+    Object.assign(pupil,{firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex,examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim()});
     saveDb(); return sendJson(res,200,{pupil,state:stateForUser(user)});
   }
 

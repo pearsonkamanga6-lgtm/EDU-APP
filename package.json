@@ -1,8 +1,8 @@
 {
   "name": "reportform-zm-simple-class-teacher",
-  "version": "3.0.5",
+  "version": "3.0.6",
   "private": true,
-  "description": "Reportform ZM V3.0.5 - no-sign-in class-teacher mode with teacher name/phone, CBC/OBC results, plus-button subjects/pupils, V2.1-style reports, AI comments and WhatsApp-ready PDFs.",
+  "description": "Reportform ZM V3.0.6 - guided class-teacher workflow with standard assessments, separate assessment records, subject-by-subject pupil result entry, CBC/OBC reports, AI comments and WhatsApp-ready PDFs.",
   "scripts": {
     "start": "node server.js"
   },
