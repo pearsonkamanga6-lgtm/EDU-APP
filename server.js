@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.0.6';
+const APP_VERSION = '3.0.7';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -25,6 +25,7 @@ const nowIso = () => new Date().toISOString();
 const id = prefix => `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
 const validPin = pin => /^\d{4,}$/.test(String(pin || '').trim());
 const normalizeGradingSystem = value => ['OBC','LEGACY'].includes(String(value || '').trim().toUpperCase()) ? 'OBC' : 'CBC';
+const normalizeSchoolType = value => ['DAY','BOARDING'].includes(String(value||'').trim().toUpperCase()) ? String(value).trim().toUpperCase() : '';
 const ASSESSMENT_NAMES = ['Week 4 Assessment','Week 8 Assessment','End of Term Test'];
 const normalizeAssessmentName = value => ASSESSMENT_NAMES.includes(String(value||'').trim()) ? String(value).trim() : 'Week 4 Assessment';
 const normalizeTerm = value => ['Term 1','Term 2','Term 3'].includes(String(value||'').trim()) ? String(value).trim() : 'Term 1';
@@ -162,11 +163,12 @@ function standaloneUser(){
   }
   let cls=userClass(user.id);
   if(!cls){
-    cls={id:id('cls'),teacherUserId:user.id,teacherName:user.name||'',teacherPhone:user.phone||'',schoolName:'',name:'',gradingSystem:'CBC',term:'Term 1',academicYear:String(new Date().getFullYear()),activeAssessmentName:'Week 4 Assessment',createdAt:nowIso()};
+    cls={id:id('cls'),teacherUserId:user.id,teacherName:user.name||'',teacherPhone:user.phone||'',schoolName:'',schoolType:'',name:'',gradingSystem:'CBC',term:'Term 1',academicYear:String(new Date().getFullYear()),activeAssessmentName:'Week 4 Assessment',createdAt:nowIso()};
     db.classes.push(cls);changed=true;
   } else {
     if(cls.teacherName===undefined){cls.teacherName=user.name||'';changed=true;}
     if(cls.teacherPhone===undefined){cls.teacherPhone=user.phone||'';changed=true;}
+    if(cls.schoolType===undefined){cls.schoolType='';changed=true;}
     if(!cls.term){cls.term='Term 1';changed=true;}
     if(!cls.academicYear){cls.academicYear=String(new Date().getFullYear());changed=true;}
   }
@@ -188,6 +190,7 @@ function standaloneUser(){
 }
 
 function cleanMark(value) {
+  if (String(value||'').trim().toUpperCase() === 'ABSENT') return 'ABSENT';
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0 || n > 100) throw new Error('Marks must be between 0 and 100');
@@ -205,58 +208,56 @@ function pupilReportSnapshot(user,pupil){
   if(!cls||!assessment) return null;
   const subjects=classSubjects(cls.id), isCBC=cls.gradingSystem==='CBC';
   const rows=subjects.map(s=>{
-    const raw=db.marks[markKey(assessment.id,pupil.id,s.id)];
-    const has=raw!==null&&raw!==undefined&&raw!==''&&Number.isFinite(Number(raw));
-    const mark=has?Number(raw):null;
-    const grade=has?(isCBC?gradeCBC(mark):gradeOBC(mark)):null;
-    return {subject:s.name,mark,grade,remark:has?(isCBC?remarkCBC(grade):remarkOBC(grade)):'Pending'};
+    const raw=db.marks[markKey(assessment.id,pupil.id,s.id)], absent=raw==='ABSENT';
+    const has=!absent&&raw!==null&&raw!==undefined&&raw!==''&&Number.isFinite(Number(raw));
+    const visited=absent||has, mark=has?Number(raw):null, grade=has?(isCBC?gradeCBC(mark):gradeOBC(mark)):null;
+    return {subject:s.name,mark,grade,status:absent?'absent':has?'mark':'pending',visited,remark:absent?'Absent / Did not write':has?(isCBC?remarkCBC(grade):remarkOBC(grade)):'Pending'};
   });
-  const entered=rows.filter(r=>r.mark!==null), complete=entered.length===rows.length && rows.length>0;
-  const strongest=[...entered].sort((a,b)=>b.mark-a.mark).slice(0,3);
-  const weakest=[...entered].sort((a,b)=>a.mark-b.mark).slice(0,3);
-  const summary={complete,entered:entered.length,total:rows.length};
-  if(entered.length){summary.average=Math.round(entered.reduce((n,x)=>n+x.mark,0)/entered.length*10)/10;}
+  const entered=rows.filter(r=>r.status==='mark'), completed=rows.filter(r=>r.visited), absent=rows.filter(r=>r.status==='absent'), complete=completed.length===rows.length&&rows.length>0;
+  const strongest=[...entered].sort((a,b)=>b.mark-a.mark).slice(0,3), weakest=[...entered].sort((a,b)=>a.mark-b.mark).slice(0,3);
+  const summary={complete,entered:entered.length,sat:entered.length,completedCount:completed.length,absentCount:absent.length,total:rows.length};
+  if(entered.length)summary.average=Math.round(entered.reduce((n,x)=>n+x.mark,0)/entered.length*10)/10;
   if(!isCBC&&entered.length){const best=[...entered].sort((a,b)=>b.mark-a.mark).slice(0,6);summary.best6Count=best.length;summary.best6=best.reduce((n,x)=>n+x.mark,0);summary.points=best.reduce((n,x)=>n+x.grade,0);if(best.length>=6)summary.division=summary.points<=12?'I':summary.points<=17?'II':summary.points<=24?'III':summary.points<=35?'IV':'FAIL';}
   if(isCBC&&entered.length)summary.averageGrade=gradeCBC(summary.average);
-  return {school:cls.schoolName,className:cls.name,term:cls.term,academicYear:cls.academicYear,assessment:assessment.name,gradingSystem:cls.gradingSystem,pupil:{name:pupil.name,firstName:pupil.firstName,surname:pupil.surname,sex:pupil.sex,examNo:pupil.examNo},rows,summary,strongest,weakest,missing:rows.filter(r=>r.mark===null).map(r=>r.subject)};
+  return {school:cls.schoolName,schoolType:cls.schoolType||'',className:cls.name,term:cls.term,academicYear:cls.academicYear,assessment:assessment.name,gradingSystem:cls.gradingSystem,pupil:{name:pupil.name,firstName:pupil.firstName,surname:pupil.surname,sex:pupil.sex,examNo:pupil.examNo},rows,summary,strongest,weakest,missing:rows.filter(r=>r.status==='pending').map(r=>r.subject),absent:rows.filter(r=>r.status==='absent').map(r=>r.subject)};
 }
 
 function smartLocalComment(snapshot){
   if(!snapshot) return 'Results are not available yet.';
-  const {pupil,summary,strongest,weakest,school,assessment,gradingSystem,missing}=snapshot;
-  const name=pupil.name||'This pupil', pr=pronouns(pupil.sex);
+  const {pupil,summary,strongest,weakest,school,schoolType,assessment,gradingSystem,missing}=snapshot;
+  const name=pupil.name||'This pupil', pr=pronouns(pupil.sex), boarding=schoolType==='BOARDING', endTerm=assessment==='End of Term Test';
   if(!summary.entered) return `Dear Parent/Guardian, results for ${name} have not yet been entered for ${assessment}. The report will be completed once the subject marks are available.`;
-  if(!summary.complete){
-    const miss=missing.slice(0,3).join(', ');
-    return `Dear Parent/Guardian, ${name}'s result record for ${assessment} is not yet complete. ${summary.entered} of ${summary.total} subject results have been entered${miss?`, while ${miss}${missing.length>3?' and other subjects':''} are still pending`:''}. A final overall judgement should be made after all required marks are entered. Please continue encouraging ${pr.obj} to revise consistently while the remaining results are completed.`;
-  }
+  if(!summary.complete){const miss=missing.slice(0,3).join(', ');return `Dear Parent/Guardian, ${name}'s result record for ${assessment} is not yet complete. ${summary.completedCount} of ${summary.total} subjects have been checked${miss?`, while ${miss}${missing.length>3?' and other subjects':''} are still pending`:''}. A final overall judgement should be made after all required results are entered.`;}
   const best=strongest[0], weak=weakest[0];
   let text=`Dear Parent/Guardian, ${name} completed ${assessment} at ${school}. `;
-  if(gradingSystem==='CBC'){
-    const g=gradeCBC(summary.average), desc=remarkCBC(g);
-    text+=`${pr.subj} obtained an overall average of ${summary.average}%, which is CBC Grade ${g} (${desc}). `;
-  }else{
-    if(summary.best6Count>=6)text+=`${pr.subj} recorded a Best 6 total of ${summary.best6}/600, ${summary.points} grade points and Division ${summary.division}. `;else text+=`${pr.subj} obtained an average of ${summary.average}% across the ${summary.entered} entered subjects. `;
-  }
-  if(best) text+=`${pr.subj} performed strongest in ${best.subject} with ${best.mark}%. `;
-  if(weak && (!best || weak.subject!==best.subject)){
-    const weakDesc=gradingSystem==='CBC'?`${remarkCBC(gradeCBC(weak.mark))}`:`Grade ${gradeOBC(weak.mark)} (${remarkOBC(gradeOBC(weak.mark))})`;
-    text+=`To improve the overall result, ${pr.subjL} should give more attention to ${weak.subject}, where the mark was ${weak.mark}%${weakDesc?` — ${weakDesc}`:''}. `;
-  }
-  text+=`Please encourage regular revision, careful correction of mistakes and consultation with subject teachers where help is needed. Continued effort and good study habits can strengthen the next result.`;
+  if(gradingSystem==='CBC'){const g=gradeCBC(summary.average), desc=remarkCBC(g);text+=`${pr.subj} obtained an overall average of ${summary.average}%, which is CBC Grade ${g} (${desc}). `;}
+  else if(summary.best6Count>=6)text+=`${pr.subj} recorded a Best 6 total of ${summary.best6}/600, ${summary.points} grade points and Division ${summary.division}. `;else text+=`${pr.subj} obtained an average of ${summary.average}% across the ${summary.entered} subjects written. `;
+  if(best)text+=`${pr.subj} performed strongest in ${best.subject} with ${best.mark}%. `;
+  if(weak&&(!best||weak.subject!==best.subject)){const weakDesc=gradingSystem==='CBC'?remarkCBC(gradeCBC(weak.mark)):`Grade ${gradeOBC(weak.mark)} (${remarkOBC(gradeOBC(weak.mark))})`;text+=`To strengthen the overall result, ${pr.subjL} should give more attention to ${weak.subject}, where the mark was ${weak.mark}%${weakDesc?` — ${weakDesc}`:''}. `;}
+  if(boarding&&!endTerm)text+=`As ${name} is still at boarding school, please use the available calls, visits or messages to encourage ${pr.obj} to remain focused, revise consistently and seek help from subject teachers in weaker areas. `;
+  else if(boarding&&endTerm)text+=`As ${name} is now with you for the holiday, please continue encouraging ${pr.obj}, help ${pr.obj} maintain a simple revision routine and give particular attention to weaker subjects before school reopens. `;
+  else if(endTerm)text+=`During the holiday, please continue encouraging ${pr.obj} to keep a balanced revision routine, correct mistakes from this assessment and prepare steadily for the next term. `;
+  else text+=`Please continue supporting regular home revision, discussion of schoolwork and timely attention to weaker subjects before the next assessment. `;
+  text+=`Continued encouragement from both home and school can help strengthen the next result.`;
   return text;
 }
 
-function aiSystemPrompt(gradingSystem){
-  const scale=gradingSystem==='CBC'
+function aiSystemPrompt(snapshot){
+  const scale=snapshot.gradingSystem==='CBC'
     ? 'CBC scale: 70-100 Grade 1 Outstanding; 60-69 Grade 2 Advanced; 50-59 Grade 3 Basic; 40-49 Grade 4 Satisfactory; 0-39 Grade 5 Unsatisfactory. Do not use Grade 6-9 or Division I-IV for CBC.'
     : 'OBC scale: 75-100 Grade 1; 70-74 Grade 2; 65-69 Grade 3; 60-64 Grade 4; 55-59 Grade 5; 50-54 Grade 6; 45-49 Grade 7; 40-44 Grade 8; 0-39 Grade 9. Best 6 points determine the displayed division in the supplied data.';
-  return `You write class-teacher comments for Zambian school report forms. Produce one polished paragraph only, about 90-150 words. Make it natural, specific, parent-friendly, encouraging and professional. Analyse only the supplied pupil data: actual marks, strongest and weakest subjects, grading, Best 6/points/division when supplied, and genuinely missing marks. ${scale} Never invent attendance, discipline, conduct, improvement/decline over time, family circumstances or personal qualities that are not present in the data. If results are incomplete, say so tactfully and do not invent missing marks. Give practical revision advice based on weaker entered subjects. Do not use bullets, markdown, headings or quotation marks.`;
+  const boarding=snapshot.schoolType==='BOARDING', endTerm=snapshot.assessment==='End of Term Test';
+  let context;
+  if(boarding&&!endTerm)context='This is a boarding school and this is a Week 4 or Week 8 progress assessment. The learner is still at school. Address the parent/guardian as someone who may have limited direct contact. Encourage them to use available calls, visits or messages to motivate the learner and to work with the school where support is needed. Do NOT tell the parent to supervise daily home study because the learner is still boarding.';
+  else if(boarding&&endTerm)context='This is a boarding school and the End of Term Test. The learner is now with the parent/guardian for the holiday. Encourage the parent to continue motivating the learner at home, help maintain a realistic holiday revision routine, focus on weaker subjects, correct mistakes, and prepare for reopening while allowing reasonable rest.';
+  else if(endTerm)context='This is a day school and the End of Term Test. The learner is with the family during the holiday. Encourage balanced holiday revision and preparation for the next term.';
+  else context='This is a day school. The learner normally returns home daily. Encourage appropriate home support, regular revision and discussion of schoolwork without inventing family circumstances.';
+  return `You write class-teacher comments for Zambian school report forms. Produce one polished paragraph only, about 90-150 words. Make it natural, specific, parent-friendly, encouraging and professional. Analyse only the supplied pupil data: actual marks, strongest and weakest subjects, grading, Best 6/points/division when supplied, assessment, school type, genuinely missing marks and subjects marked absent. ${scale} ${context} Never invent attendance, discipline, conduct, improvement/decline over time, family circumstances or personal qualities that are not present in the data. If results are incomplete, say so tactfully and do not invent missing marks. Give practical advice based on weaker entered subjects. Do not use bullets, markdown, headings or quotation marks.`;
 }
 
 async function generateOnlineComment(snapshot){
   if(!OPENAI_API_KEY) return null;
-  const res=await fetch(OPENAI_API_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}`},body:JSON.stringify({model:OPENAI_MODEL,messages:[{role:'system',content:aiSystemPrompt(snapshot.gradingSystem)},{role:'user',content:`Generate one class teacher comment for this report form.\n\nPupil data:\n${JSON.stringify(snapshot,null,2)}`}],temperature:0.7,max_tokens:260})});
+  const res=await fetch(OPENAI_API_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}`},body:JSON.stringify({model:OPENAI_MODEL,messages:[{role:'system',content:aiSystemPrompt(snapshot)},{role:'user',content:`Generate one class teacher comment for this report form.\n\nPupil data:\n${JSON.stringify(snapshot,null,2)}`}],temperature:0.7,max_tokens:260})});
   const raw=await res.text();
   let data;try{data=JSON.parse(raw);}catch{data={raw};}
   if(!res.ok) throw new Error(data?.error?.message||raw.slice(0,240)||`AI request failed (${res.status})`);
@@ -343,11 +344,11 @@ async function api(req,res,urlObj) {
     const teacherName=String(b.teacherName||'').trim(); const teacherPhone=String(b.teacherPhone||'').trim();
     const schoolName=String(b.schoolName||'').trim(); const className=String(b.className||'').trim();
     const assessmentName=normalizeAssessmentName(b.assessmentName);
-    const gradingSystem=normalizeGradingSystem(b.gradingSystem);
+    const gradingSystem=normalizeGradingSystem(b.gradingSystem); const schoolType=normalizeSchoolType(b.schoolType);
     const term=normalizeTerm(b.term); const academicYear=normalizeAcademicYear(b.academicYear);
-    if(!teacherName||!teacherPhone||!schoolName||!className) return sendError(res,400,'Class teacher name, phone number, school and class are required');
+    if(!teacherName||!teacherPhone||!schoolName||!className||!schoolType) return sendError(res,400,'Class teacher name, phone number, school, class and school type are required');
     user.name=teacherName; user.phone=teacherPhone; cls.teacherName=teacherName; cls.teacherPhone=teacherPhone;
-    cls.schoolName=schoolName; cls.name=className; cls.gradingSystem=gradingSystem; cls.term=term; cls.academicYear=academicYear;
+    cls.schoolName=schoolName; cls.schoolType=schoolType; cls.name=className; cls.gradingSystem=gradingSystem; cls.term=term; cls.academicYear=academicYear;
     ensureAssessment(cls,assessmentName);
 
     // Backward-compatible support for older V3 clients that still submit a subject array.
@@ -372,6 +373,14 @@ async function api(req,res,urlObj) {
       for(const row of pupilRows){ const key=(row.examNo||row.name).toLowerCase(); let p=pupilByKey.get(key); if(!p){p={id:id('p'),classId:cls.id,active:true};db.pupils.push(p);} Object.assign(p,row,{active:true}); }
     }
     saveDb(); return sendJson(res,200,stateForUser(user));
+  }
+
+  if (req.method === 'PUT' && pathname === '/api/assessment') {
+    const b=await readJson(req), cls=userClass(user.id);
+    if(!cls) return sendError(res,404,'Class not found');
+    const assessmentName=normalizeAssessmentName(b.assessmentName), term=normalizeTerm(b.term||cls.term), academicYear=normalizeAcademicYear(b.academicYear||cls.academicYear);
+    cls.term=term; cls.academicYear=academicYear; ensureAssessment(cls,assessmentName,term,academicYear); saveDb();
+    return sendJson(res,200,stateForUser(user));
   }
 
   if (req.method === 'POST' && pathname === '/api/subjects') {
