@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.1.2';
+const APP_VERSION = '3.1.3';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -302,7 +302,7 @@ async function api(req,res,urlObj){
 }
 
 const MIME={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.svg':'image/svg+xml'};
-function serveStatic(pathname,res){let rel=decodeURIComponent(pathname||'/');if(rel==='/'||rel==='')rel='/index.html';const file=path.normalize(path.join(PUBLIC_DIR,rel));if(!file.startsWith(PUBLIC_DIR))return false;let final=file;try{if(fs.statSync(final).isDirectory())final=path.join(final,'index.html');}catch{return false;}try{const data=fs.readFileSync(final);res.writeHead(200,{'Content-Type':MIME[path.extname(final).toLowerCase()]||'application/octet-stream','Cache-Control':path.basename(final)==='service-worker.js'?'no-cache':'public, max-age=60'});res.end(data);return true;}catch{return false;}}
+function serveStatic(pathname,res){let rel=decodeURIComponent(pathname||'/');if(rel==='/'||rel==='')rel='/index.html';const file=path.normalize(path.join(PUBLIC_DIR,rel));if(!file.startsWith(PUBLIC_DIR))return false;let final=file;try{if(fs.statSync(final).isDirectory())final=path.join(final,'index.html');}catch{return false;}try{const data=fs.readFileSync(final);{const base=path.basename(final);const fresh=['service-worker.js','app.js','styles.css','index.html'].includes(base);res.writeHead(200,{'Content-Type':MIME[path.extname(final).toLowerCase()]||'application/octet-stream','Cache-Control':fresh?'no-store, no-cache, must-revalidate':'public, max-age=60'});}res.end(data);return true;}catch{return false;}}
 
 const server=http.createServer(async(req,res)=>{const urlObj=new URL(req.url,`http://${req.headers.host||'localhost'}`);try{if(urlObj.pathname.startsWith('/api/')){await api(req,res,urlObj);return;}if(!serveStatic(urlObj.pathname,res))sendError(res,404,'Not found');}catch(err){console.error(err);if(!res.headersSent)sendError(res,err.status||500,err.message||'Server error');else res.end();}});
 
