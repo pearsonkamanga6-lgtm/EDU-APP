@@ -24,3 +24,29 @@
 /* V3.0.7 simple progress dashboard + day/boarding context */
 .workflow-step.done{border-color:#b9dfd1;background:#f0faf6;color:#08704f}.workflow-step.done span{background:#08704f;color:#fff}.workflow-step.current.done{border-color:#7da4df;background:#eef5ff;color:var(--navy)}.workflow-step.current.done span{background:var(--navy);color:#fff}.dashboard-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}.dashboard-stats>div{background:#fff;border:1px solid var(--line);border-radius:15px;padding:13px;text-align:center;display:grid;gap:3px}.dashboard-stats b{font-size:22px;color:var(--navy)}.dashboard-stats span{font-size:11px;color:var(--muted);font-weight:700}.continue-work{margin:0 0 12px}.all-complete-banner{margin:0 0 12px;padding:13px 15px;border:1px solid #bce0d2;background:#edf9f4;color:#08704f;border-radius:14px;font-weight:800}.next-assessment-card{display:flex;align-items:center;justify-content:space-between;gap:15px;background:#fff;border:1px solid #d7e1ef;border-radius:17px;padding:15px;margin:12px 0}.next-assessment-card>div{display:grid;gap:4px}.next-assessment-card b{color:var(--navy)}.next-assessment-card span{color:var(--muted);font-size:12px;line-height:1.4}.school-setup-grid{grid-template-columns:1fr 2fr 1fr}.absent-note{background:#fff6df;border:1px solid #efd394;color:#765600;border-radius:12px;padding:10px 12px;font-size:12px;font-weight:800;margin:-8px 0 13px}.mini-pupil-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}.mini-report-btn{width:max-content;max-width:100%;border:0;background:#f2f4f8;color:#3c4c65;font-size:11px;font-weight:900;border-radius:999px;padding:5px 9px;cursor:pointer}
 @media(max-width:650px){.dashboard-stats{grid-template-columns:repeat(2,1fr)}.next-assessment-card{align-items:stretch;flex-direction:column}.next-assessment-card .btn{width:100%}.school-setup-grid{grid-template-columns:1fr}.mini-pupil-actions{display:grid;grid-template-columns:1fr 1fr}.mini-pupil-actions button{width:100%}}
+
+/* V3.1 multi-teacher and school-calendar additions */
+.cloud-status{margin:12px 0;padding:11px 13px;border-radius:12px;font-size:.86rem;font-weight:700;line-height:1.35}
+.cloud-status.ok{background:#ecfdf5;border:1px solid #a7f3d0;color:#166534}
+.cloud-status.warn{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412}
+.hero-calendar{display:inline-flex;margin-top:8px;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.14);font-size:.82rem;font-weight:800}
+.setup-section.compact{margin-top:4px}
+.calendar-grid{align-items:end}
+.school-calendar-report{margin:10px 0 4px;padding:8px 10px;border:1px solid #bfdbfe;background:#eff6ff;text-align:center;color:#1e40af;font-size:.86rem;border-radius:6px}
+@media(max-width:720px){.calendar-grid{grid-template-columns:1fr!important}.hero-calendar{display:flex;width:max-content;max-width:100%}}
+
+/* V3.1.2 Grade/Form + stream class selector */
+.class-selector-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;align-items:end}
+.school-details-grid{display:grid;grid-template-columns:2fr 1fr;gap:12px}
+.conditional-field{display:none}
+.class-preview{padding:10px 13px;border:1px solid #c9ddf4;background:#eef7ff;border-radius:12px;color:#34506e;font-size:13px}
+.class-preview b{color:var(--navy);font-size:15px}
+#gradeLevel,#classStream{font-weight:800;color:var(--navy)}
+@media(max-width:900px){.class-selector-grid{grid-template-columns:1fr 1fr}.school-details-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:650px){.class-selector-grid,.school-details-grid{grid-template-columns:1fr}.class-preview{font-size:12px}}
+
+
+/* V3.1.3 highly visible school calendar controls */
+.school-calendar-card{border:2px solid #2f67b5;background:#f1f7ff;border-radius:16px;padding:15px;margin:2px 0 4px;box-shadow:0 3px 10px rgba(20,58,112,.06)}
+.school-calendar-card-head{display:flex;align-items:flex-start;gap:11px;margin-bottom:13px}.calendar-icon{font-size:24px;line-height:1}.school-calendar-card-head b{display:block;color:var(--navy);font-size:15px}.school-calendar-card-head small{display:block;color:#53657c;font-size:12px;line-height:1.4;margin-top:3px}.calendar-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.calendar-fields label{font-weight:800;color:#233b61}.calendar-fields select,.calendar-fields input{background:#fff;border:1.5px solid #91acd3}.school-calendar-card.needs-attention{border-color:#b42318;background:#fff3f1;box-shadow:0 0 0 3px rgba(180,35,24,.08)}.grading-single{display:grid;grid-template-columns:1fr;margin-top:3px}.grading-single select{font-weight:800}.app-version-badge{font-size:10px;color:#667085;font-weight:800}
+@media(max-width:650px){.calendar-fields{grid-template-columns:1fr}.school-calendar-card{padding:13px}}

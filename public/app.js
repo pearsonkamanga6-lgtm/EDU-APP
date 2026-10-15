@@ -1,10 +1,17 @@
 (() => {
-  const APP_VERSION='3.0.7';
+  const APP_VERSION='3.1.3';
   const app=document.getElementById('app');
   const state={me:null,page:'home',saveTimer:null};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
   const byId=id=>document.getElementById(id);
-  const ASSESSMENT_OPTIONS=['Week 4 Assessment','Week 8 Assessment','End of Term Test'];
+  const BASE_ASSESSMENT_OPTIONS=['Week 4 Assessment','Week 8 Assessment','End of Term Test'];
+  const GRADE12_EXTRA_ASSESSMENTS=['Pre-Mock Exam','Mock Exam','Post-Mock Exam'];
+  const GRADE_LEVEL_OPTIONS=[['FORM1','Form 1'],['FORM2','Form 2'],['GRADE10','Grade 10'],['GRADE11','Grade 11'],['GRADE12','Grade 12'],['OTHER','Other class']];
+  const STREAMS={FORM1:['L','M'],FORM2:['L','M'],GRADE10:['L','N','P','M'],GRADE11:['L','N','P','M'],GRADE12:['L','N','P','M']};
+  function normalizeGradeLevel(value){const v=String(value||'').trim().toUpperCase().replace(/[^A-Z0-9]/g,'');return ['FORM1','FORM2','GRADE10','GRADE11','GRADE12'].includes(v)?v:'OTHER';}
+  function parseClassSelection(value){const raw=String(value||'').trim();let m;if((m=raw.match(/^FORM\s*1\s*([A-Z0-9-]+)?$/i)))return{gradeLevel:'FORM1',stream:(m[1]||'').toUpperCase()};if((m=raw.match(/^FORM\s*2\s*([A-Z0-9-]+)?$/i)))return{gradeLevel:'FORM2',stream:(m[1]||'').toUpperCase()};if((m=raw.match(/^(?:GRADE\s*)?(10|11|12)\s*([A-Z0-9-]+)?$/i)))return{gradeLevel:`GRADE${m[1]}`,stream:(m[2]||'').toUpperCase()};return{gradeLevel:'OTHER',stream:''};}
+  function classNameForSelection(gradeLevel,stream,customClass=''){const g=normalizeGradeLevel(gradeLevel),st=String(stream||'').trim().toUpperCase();if(g==='FORM1')return `Form 1${st}`;if(g==='FORM2')return `Form 2${st}`;if(g==='GRADE10')return `10${st}`;if(g==='GRADE11')return `11${st}`;if(g==='GRADE12')return `12${st}`;return String(customClass||'').trim();}
+  function assessmentOptionsForClass(value,gradeLevel=''){const g=normalizeGradeLevel(gradeLevel||parseClassSelection(value).gradeLevel);return g==='GRADE12'?[...BASE_ASSESSMENT_OPTIONS,...GRADE12_EXTRA_ASSESSMENTS]:BASE_ASSESSMENT_OPTIONS;}
   const assessmentLabel=d=>d?.assessment?.name||'Week 4 Assessment';
   function workflowBar(step){
     const d=state.me||{}, details=profileComplete(), hasSubjects=(d.subjects?.length||0)>0, hasPupils=(d.pupils?.length||0)>0;
@@ -32,7 +39,16 @@
 
   function profileComplete(){
     const d=state.me;
-    return !!(String(d?.class?.teacherName||d?.user?.name||'').trim() && String(d?.class?.teacherPhone||d?.user?.phone||'').trim() && String(d?.class?.schoolName||'').trim() && String(d?.class?.name||'').trim() && ['DAY','BOARDING'].includes(String(d?.class?.schoolType||'').toUpperCase()));
+    return !!(String(d?.class?.teacherName||d?.user?.name||'').trim() && String(d?.class?.teacherPhone||d?.user?.phone||'').trim() && String(d?.class?.schoolName||'').trim() && String(d?.class?.name||'').trim() && ['DAY','BOARDING'].includes(String(d?.class?.schoolType||'').toUpperCase()) && ['OPENS','CLOSES'].includes(String(d?.assessment?.schoolDateType||'').toUpperCase()) && /^\d{4}-\d{2}-\d{2}$/.test(String(d?.assessment?.schoolDate||'')));
+  }
+
+  function formatStoredDate(value){
+    const m=String(value||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);if(!m)return'';
+    return new Date(Number(m[1]),Number(m[2])-1,Number(m[3])).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
+  }
+  function schoolCalendarLabel(d){
+    const a=d?.assessment||{},date=formatStoredDate(a.schoolDate);if(!date)return'';
+    return `School ${a.schoolDateType==='CLOSES'?'closes':'opens'} on ${date}`;
   }
 
   async function bootstrap(){
@@ -80,7 +96,7 @@
     const next=models.find(x=>!x.m.summary.complete)||null;
     return{complete,inProgress,notStarted,next};
   }
-  function nextAssessmentName(current){const i=ASSESSMENT_OPTIONS.indexOf(current);return i>=0&&i<ASSESSMENT_OPTIONS.length-1?ASSESSMENT_OPTIONS[i+1]:null;}
+  function nextAssessmentName(current){const options=assessmentOptionsForClass(state.me?.class?.name||'',state.me?.class?.gradeLevel||'');const i=options.indexOf(current);return i>=0&&i<options.length-1?options[i+1]:null;}
   async function startAssessment(name){
     if(!name)return;
     if(!confirm(`Open ${name}? The same class, subjects and pupils will be kept. Its marks are stored separately.`))return;
@@ -91,7 +107,10 @@
     const d=state.me,{total,completedCells}=stats(),pct=total?Math.round(completedCells/total*100):0,ps=progressSummary(d),nextAssessment=nextAssessmentName(assessmentLabel(d));
     const schoolType=d.class?.schoolType==='BOARDING'?'Boarding School':'Day School';
     const continueHtml=ps.next?`<button id="continuePupil" class="btn primary big full continue-work">Continue ${esc(ps.next.p.name)} — ${ps.next.m.summary.completedCount}/${ps.next.m.summary.total} subjects →</button>`:(d.pupils?.length?'<div class="all-complete-banner">✓ All pupils have been checked for this assessment.</div>':'');
-    c.innerHTML=`<section class="hero"><span class="eyebrow">CLASS TEACHER MODE</span><h1>${esc(d.class?.name||'My Class')}</h1><p>${esc(assessmentLabel(d))} • ${esc(d.class?.term||'Term 1')} ${esc(d.class?.academicYear||new Date().getFullYear())} • ${esc(schoolType)} • ${esc(d.class?.gradingSystem==='CBC'?'CBC':'OBC')} grading</p><div class="progress"><span style="width:${pct}%"></span></div><small>${completedCells}/${total} subject entries checked for this assessment</small></section>
+    const calendar=schoolCalendarLabel(d);
+    const storageBanner=d.storage?.multiTeacherReady?`<div class="cloud-status ok">✓ Cloud database connected — this teacher/class workspace is separate from other teachers.</div>`:`<div class="cloud-status warn">⚠ Multi-teacher database is not connected yet. Add DATABASE_URL on Render before many teachers use the app.</div>`;
+    c.innerHTML=`<section class="hero"><span class="eyebrow">CLASS TEACHER MODE</span><h1>${esc(d.class?.name||'My Class')}</h1><p>${esc(assessmentLabel(d))} • ${esc(d.class?.term||'Term 1')} ${esc(d.class?.academicYear||new Date().getFullYear())} • ${esc(schoolType)} • ${esc(d.class?.gradingSystem==='CBC'?'CBC':'OBC')} grading</p>${calendar?`<div class="hero-calendar">${esc(calendar)}</div>`:''}<div class="progress"><span style="width:${pct}%"></span></div><small>${completedCells}/${total} subject entries checked for this assessment</small></section>
+      ${storageBanner}
       <div class="dashboard-stats"><div><b>${d.pupils?.length||0}</b><span>Pupils</span></div><div><b>${ps.complete}</b><span>Complete</span></div><div><b>${ps.inProgress}</b><span>In progress</span></div><div><b>${ps.notStarted}</b><span>Not started</span></div></div>
       ${continueHtml}
       ${(d.subjects?.length||0)===0?'<div class="notice">Step 2: add the subjects taught in this class.</div>':(d.pupils?.length||0)===0?'<div class="notice">Step 3: add the first pupil. Results will open immediately after the pupil is saved.</div>':''}
@@ -233,20 +252,71 @@
   function renderSetup(c){
     const d=state.me,grading=d.class?.gradingSystem==='CBC'?'CBC':'OBC';
     const teacherName=d.class?.teacherName||d.user?.name||'',teacherPhone=d.class?.teacherPhone||d.user?.phone||'';
-    const currentAssessment=ASSESSMENT_OPTIONS.includes(d.assessment?.name)?d.assessment.name:'Week 4 Assessment';
+    const parsed=parseClassSelection(d.class?.name||'');
+    const gradeLevel=normalizeGradeLevel(d.class?.gradeLevel||parsed.gradeLevel),savedStream=String(d.class?.stream||parsed.stream||'').toUpperCase();
+    const knownStreams=STREAMS[gradeLevel]||[],streamIsKnown=knownStreams.includes(savedStream),initialStream=gradeLevel==='OTHER'?'':(streamIsKnown?savedStream:(savedStream?'OTHER':knownStreams[0]||''));
+    const customStream=!streamIsKnown&&savedStream?savedStream:'';
+    const setupAssessmentOptions=assessmentOptionsForClass(d.class?.name||'',gradeLevel);
+    const currentAssessment=setupAssessmentOptions.includes(d.assessment?.name)?d.assessment.name:'Week 4 Assessment';
     const term=['Term 1','Term 2','Term 3'].includes(d.class?.term)?d.class.term:'Term 1',year=d.class?.academicYear||String(new Date().getFullYear()),schoolType=['DAY','BOARDING'].includes(d.class?.schoolType)?d.class.schoolType:'';
+    const schoolDateType=['OPENS','CLOSES'].includes(d.assessment?.schoolDateType)?d.assessment.schoolDateType:'',schoolDate=d.assessment?.schoolDate||'';
     c.innerHTML=`${workflowBar('setup')}<div class="page-head"><h2>Start the Class</h2><p>Enter these details first. When you save, the app will take you directly to the subjects.</p></div><form id="setupForm" class="card stack guided-setup">
       <div class="setup-section"><span class="setup-number">1</span><div><h3>Class Teacher</h3><p>Your name and phone number will appear on the report.</p></div></div>
       <div class="teacher-grid"><label>Class teacher's name<input id="teacherName" value="${esc(teacherName)}" placeholder="Enter class teacher's full name" autocomplete="name" required></label><label>Class teacher's phone number<input id="teacherPhone" value="${esc(teacherPhone)}" placeholder="e.g. 0973731979" inputmode="tel" autocomplete="tel" required></label></div>
-      <div class="setup-section"><span class="setup-number">2</span><div><h3>Class & School</h3><p>Identify the class and whether learners return home daily or board at school.</p></div></div>
-      <div class="setup-grid school-setup-grid"><label>Class<input id="className" value="${esc(d.class?.name||'')}" placeholder="e.g. 10L" required></label><label>School name<input id="schoolName" value="${esc(d.class?.schoolName||'')}" placeholder="Enter school name" required></label><label>School type<select id="schoolType" required><option value="">Choose school type</option><option value="DAY" ${schoolType==='DAY'?'selected':''}>Day School</option><option value="BOARDING" ${schoolType==='BOARDING'?'selected':''}>Boarding School</option></select></label></div>
+      <div class="setup-section"><span class="setup-number">2</span><div><h3>Class & School</h3><p>Choose the Grade/Form and stream. Grade 12 automatically unlocks Pre-Mock, Mock and Post-Mock assessments.</p></div></div>
+      <div class="class-selector-grid">
+        <label>Grade / Form<select id="gradeLevel" required>${GRADE_LEVEL_OPTIONS.map(([v,l])=>`<option value="${v}" ${gradeLevel===v?'selected':''}>${l}</option>`).join('')}</select></label>
+        <label id="streamField">Class stream<select id="classStream"></select></label>
+        <label id="customStreamField" class="conditional-field">Other stream<input id="customStream" value="${esc(customStream)}" maxlength="8" placeholder="e.g. A or K"></label>
+        <label id="customClassField" class="conditional-field">Other class name<input id="customClassName" value="${esc(gradeLevel==='OTHER'?(d.class?.name||''):'')}" placeholder="e.g. 9A"></label>
+      </div>
+      <div id="classPreview" class="class-preview"></div>
+      <div class="school-details-grid"><label>School name<input id="schoolName" value="${esc(d.class?.schoolName||'')}" placeholder="Enter school name" required></label><label>School type<select id="schoolType" required><option value="">Choose school type</option><option value="DAY" ${schoolType==='DAY'?'selected':''}>Day School</option><option value="BOARDING" ${schoolType==='BOARDING'?'selected':''}>Boarding School</option></select></label></div>
       <div class="setup-section"><span class="setup-number">3</span><div><h3>Assessment</h3><p>Choose the assessment whose marks and reports you are entering now.</p></div></div>
-      <div class="setup-grid"><label>Term<select id="term"><option ${term==='Term 1'?'selected':''}>Term 1</option><option ${term==='Term 2'?'selected':''}>Term 2</option><option ${term==='Term 3'?'selected':''}>Term 3</option></select></label><label>Academic year<input id="academicYear" type="number" min="2020" max="2100" value="${esc(year)}" required></label><label class="assessment-field">Assessment<select id="assessmentName">${ASSESSMENT_OPTIONS.map(x=>`<option value="${esc(x)}" ${x===currentAssessment?'selected':''}>${esc(x)}</option>`).join('')}</select></label></div>
-      <label>Grading system<select id="grading"><option value="CBC" ${grading==='CBC'?'selected':''}>CBC (Grades 1–5)</option><option value="OBC" ${grading==='OBC'?'selected':''}>OBC (Grades 1–9)</option></select></label>
-      <div class="assessment-note">Marks are kept separately for Week 4, Week 8 and End of Term. Changing the assessment does not overwrite another assessment's results.</div>
+      <div class="setup-grid"><label>Term<select id="term"><option ${term==='Term 1'?'selected':''}>Term 1</option><option ${term==='Term 2'?'selected':''}>Term 2</option><option ${term==='Term 3'?'selected':''}>Term 3</option></select></label><label>Academic year<input id="academicYear" type="number" min="2020" max="2100" value="${esc(year)}" required></label><label class="assessment-field">Assessment<select id="assessmentName">${setupAssessmentOptions.map(x=>`<option value="${esc(x)}" ${x===currentAssessment?'selected':''}>${esc(x)}</option>`).join('')}</select></label></div>
+      <div class="setup-section compact"><span class="setup-number">4</span><div><h3>School Opening / Closing Date</h3><p>This date will appear on the pupil report and can also guide the parent/guardian comment.</p></div></div>
+      <div class="school-calendar-card" id="schoolCalendarPanel">
+        <div class="school-calendar-card-head"><span class="calendar-icon">📅</span><div><b>School calendar for this report</b><small>Choose whether the report should say the school opens or closes, then select the exact date.</small></div></div>
+        <div class="calendar-fields">
+          <label>School status<select id="schoolDateType" required><option value="">Select school opens / closes</option><option value="OPENS" ${schoolDateType==='OPENS'?'selected':''}>School opens on</option><option value="CLOSES" ${schoolDateType==='CLOSES'?'selected':''}>School closes on</option></select></label>
+          <label><span id="schoolDateLabel">${schoolDateType==='CLOSES'?'School closing date':schoolDateType==='OPENS'?'School opening date':'Opening / closing date'}</span><input id="schoolDate" type="date" value="${esc(schoolDate)}" required></label>
+        </div>
+      </div>
+      <div class="grading-single"><label>Grading system<select id="grading"><option value="CBC" ${grading==='CBC'?'selected':''}>CBC (Grades 1–5)</option><option value="OBC" ${grading==='OBC'?'selected':''}>OBC (Grades 1–9)</option></select></label></div>
+      <div class="assessment-note">Grade 12 classes have Week 4, Week 8, End of Term, Pre-Mock, Mock and Post-Mock. Every assessment keeps separate marks and comments.</div>
       <button class="btn primary big" type="submit">Save & Continue to Subjects →</button>
     </form>`;
-    byId('setupForm').onsubmit=async e=>{e.preventDefault();const btn=e.submitter;btn.disabled=true;btn.textContent='Saving…';try{state.me=await api('/api/setup',{method:'PUT',body:{teacherName:byId('teacherName').value,teacherPhone:byId('teacherPhone').value,schoolName:byId('schoolName').value,className:byId('className').value,schoolType:byId('schoolType').value,term:byId('term').value,academicYear:byId('academicYear').value,assessmentName:byId('assessmentName').value,gradingSystem:byId('grading').value}});toast(`${state.me.assessment.name} selected`);renderShell();navigate('subjects');}catch(err){toast(err.message,true)}finally{btn.disabled=false;btn.textContent='Save & Continue to Subjects →';}};
+    const gradeSelect=byId('gradeLevel'),streamSelect=byId('classStream'),customStreamInput=byId('customStream'),customClassInput=byId('customClassName'),assessmentSelect=byId('assessmentName');
+    let lastGrade=gradeLevel;
+    const effectiveStream=()=>streamSelect.value==='OTHER'?customStreamInput.value.trim().toUpperCase():streamSelect.value;
+    const currentClassName=()=>classNameForSelection(gradeSelect.value,effectiveStream(),customClassInput.value);
+    const refreshAssessmentOptions=()=>{const options=assessmentOptionsForClass(currentClassName(),gradeSelect.value),selected=assessmentSelect.value;assessmentSelect.innerHTML=options.map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');assessmentSelect.value=options.includes(selected)?selected:'Week 4 Assessment';};
+    const refreshClassPreview=()=>{const name=currentClassName();byId('classPreview').innerHTML=name?`Selected class: <b>${esc(name)}</b>`:'Choose the class above.';};
+    const refreshClassControls=(preserve=true)=>{
+      const grade=gradeSelect.value,streams=STREAMS[grade]||[];
+      const previous=preserve?streamSelect.value:'';
+      byId('streamField').style.display=grade==='OTHER'?'none':'';
+      byId('customClassField').style.display=grade==='OTHER'?'grid':'none';
+      if(grade!=='OTHER'){
+        streamSelect.innerHTML=[...streams,'OTHER'].map(v=>`<option value="${v}">${v==='OTHER'?'Other stream':v}</option>`).join('');
+        const preferred=grade===lastGrade?(previous||initialStream):'';
+        streamSelect.value=[...streams,'OTHER'].includes(preferred)?preferred:(streams[0]||'OTHER');
+        byId('customStreamField').style.display=streamSelect.value==='OTHER'?'grid':'none';
+      }else byId('customStreamField').style.display='none';
+      lastGrade=grade;refreshClassPreview();refreshAssessmentOptions();
+    };
+    refreshClassControls(false);
+    if(gradeLevel!=='OTHER')streamSelect.value=initialStream||streamSelect.value;
+    byId('customStreamField').style.display=streamSelect.value==='OTHER'?'grid':'none';
+    refreshClassPreview();refreshAssessmentOptions();
+    gradeSelect.addEventListener('change',()=>refreshClassControls(false));
+    streamSelect.addEventListener('change',()=>{byId('customStreamField').style.display=streamSelect.value==='OTHER'?'grid':'none';refreshClassPreview();refreshAssessmentOptions();});
+    customStreamInput.addEventListener('input',()=>{customStreamInput.value=customStreamInput.value.toUpperCase();refreshClassPreview();refreshAssessmentOptions();});
+    customClassInput.addEventListener('input',()=>{refreshClassPreview();refreshAssessmentOptions();});
+    const schoolDateTypeSelect=byId('schoolDateType'),schoolDateInput=byId('schoolDate'),schoolDateLabel=byId('schoolDateLabel');
+    const refreshSchoolDateLabel=()=>{schoolDateLabel.textContent=schoolDateTypeSelect.value==='CLOSES'?'School closing date':schoolDateTypeSelect.value==='OPENS'?'School opening date':'Opening / closing date';};
+    schoolDateTypeSelect.addEventListener('change',refreshSchoolDateLabel);refreshSchoolDateLabel();
+    byId('setupForm').onsubmit=async e=>{e.preventDefault();const btn=e.submitter;const selectedGrade=gradeSelect.value,stream=selectedGrade==='OTHER'?'':effectiveStream(),className=currentClassName();if(selectedGrade!=='OTHER'&&!stream){toast('Choose or enter the class stream',true);return;}if(!className){toast('Choose the class',true);return;}if(!schoolDateTypeSelect.value||!schoolDateInput.value){const panel=byId('schoolCalendarPanel');panel.classList.add('needs-attention');panel.scrollIntoView({behavior:'smooth',block:'center'});if(!schoolDateTypeSelect.value)schoolDateTypeSelect.focus();else schoolDateInput.focus();toast('Choose School opens on / School closes on and select the date',true);return;}btn.disabled=true;btn.textContent='Saving…';try{state.me=await api('/api/setup',{method:'PUT',body:{teacherName:byId('teacherName').value,teacherPhone:byId('teacherPhone').value,schoolName:byId('schoolName').value,gradeLevel:selectedGrade,stream,className,schoolType:byId('schoolType').value,term:byId('term').value,academicYear:byId('academicYear').value,assessmentName:byId('assessmentName').value,schoolDateType:schoolDateTypeSelect.value,schoolDate:schoolDateInput.value,gradingSystem:byId('grading').value}});toast(`${state.me.class.name} • ${state.me.assessment.name}`);renderShell();navigate('subjects');}catch(err){toast(err.message,true)}finally{btn.disabled=false;btn.textContent='Save & Continue to Subjects →';}};
   }
 
   function renderResults(c){
@@ -298,7 +368,7 @@
 
   function pronouns(sex){const s=String(sex||'').toUpperCase();if(s==='F')return{subj:'She',subjL:'she',obj:'her'};if(s==='M')return{subj:'He',subjL:'he',obj:'him'};return{subj:'The learner',subjL:'the learner',obj:'the learner'};}
   function smartLocalComment(d,p,m){
-    const entered=m.rows.filter(x=>x.status==='mark'),pr=pronouns(p.sex),name=p.name||'This pupil',assessment=d.assessment.name,boarding=d.class?.schoolType==='BOARDING',endTerm=assessment==='End of Term Test';
+    const entered=m.rows.filter(x=>x.status==='mark'),pr=pronouns(p.sex),name=p.name||'This pupil',assessment=d.assessment.name,boarding=d.class?.schoolType==='BOARDING',endTerm=assessment==='End of Term Test',mockExam=/Mock Exam$/i.test(assessment),calendar=schoolCalendarLabel(d),reopen=d.assessment?.schoolDateType==='OPENS'&&d.assessment?.schoolDate?formatStoredDate(d.assessment.schoolDate):'';
     if(!entered.length)return `Dear Parent/Guardian, results for ${name} have not yet been entered for ${assessment}. The report will be completed once the subject marks are available.`;
     if(!m.summary.complete){const missing=m.rows.filter(x=>x.status==='pending').map(x=>x.subject);return `Dear Parent/Guardian, ${name}'s result record for ${assessment} is not yet complete. ${m.summary.completedCount} of ${m.summary.total} subjects have been checked${missing.length?`, while ${missing.slice(0,3).join(', ')}${missing.length>3?' and other subjects':''} are still pending`:''}. A final overall judgement should be made after all required results are entered.`;}
     const sorted=[...entered].sort((a,b)=>b.mark-a.mark),best=sorted[0],weak=sorted[sorted.length-1];let text=`Dear Parent/Guardian, ${name} completed ${assessment} at ${d.class.schoolName}. `;
@@ -306,10 +376,12 @@
     else if(m.summary.best6Count>=6)text+=`${pr.subj} recorded a Best 6 total of ${m.summary.best6}/600, ${m.summary.points} grade points and Division ${m.summary.division}. `;else text+=`${pr.subj} obtained an average of ${m.summary.average}% across the ${m.summary.entered} subjects written. `;
     text+=`${pr.subj} performed strongest in ${best.subject} with ${best.mark}%. `;
     if(weak.subject!==best.subject)text+=`To strengthen the overall result, ${pr.subjL} should give more attention to ${weak.subject}, where the mark was ${weak.mark}% (Grade ${weak.grade} — ${weak.remark}). `;
+    if(mockExam)text+=`As this is a Grade 12 examination assessment, please encourage ${pr.obj} to use the result to identify examination gaps, practise past-paper questions and strengthen weaker subjects before the next examination. `;
     if(boarding&&!endTerm)text+=`As ${name} is still at boarding school, please use the available calls, visits or messages to encourage ${pr.obj} to remain focused, revise consistently and seek help from subject teachers in weaker areas. `;
-    else if(boarding&&endTerm)text+=`As ${name} is now with you for the holiday, please continue encouraging ${pr.obj}, help ${pr.obj} maintain a simple revision routine and give particular attention to the weaker subjects before school reopens. `;
+    else if(boarding&&endTerm)text+=`As ${name} is now with you for the holiday, please continue encouraging ${pr.obj}, help ${pr.obj} maintain a simple revision routine and give particular attention to the weaker subjects${reopen?` before school reopens on ${reopen}`:' before school reopens'}. `;
     else if(endTerm)text+=`During the holiday, please continue encouraging ${pr.obj} to keep a balanced revision routine, correct mistakes from this assessment and prepare steadily for the next term. `;
     else text+=`Please continue supporting regular home revision, discussion of schoolwork and timely attention to the weaker subjects before the next assessment. `;
+    if(calendar)text+=`${calendar}. `;
     text+=`Continued encouragement from both home and school can help strengthen the next result.`;
     return text;
   }
@@ -332,6 +404,7 @@
       <div class="report-table-wrap"><table class="report-table old-report-table"><thead><tr><th>SUBJECT</th><th>TOTAL SAT</th><th>MARK (%)</th><th>GRADE</th><th>PTS</th><th>AV</th><th>COMMENT</th></tr></thead><tbody>${m.rows.map((r,i)=>`<tr class="${i%2?'alt':''}"><td>${esc(String(r.subject).toUpperCase())}</td><td>${r.totalSat}</td><td class="grade-mark">${r.status==='absent'?'ABS':(r.mark??'—')}</td><td class="grade-mark">${r.grade??'—'}</td><td>${r.points??'—'}</td><td>${r.average??'—'}</td><td>${esc(r.remark)}</td></tr>`).join('')}</tbody></table></div>
       <div class="old-summary">${!m.summary.complete?`RESULT STATUS: <b>INCOMPLETE (${m.summary.completedCount}/${m.summary.total} subjects checked)</b>`:d.class.gradingSystem==='CBC'?`OVERALL AVERAGE: <b>${m.summary.average}%</b><span>SAT: <b>${m.summary.sat}/${m.summary.total}</b> • CBC AVG GRADE: <b>Grade ${m.summary.averageGrade} — ${esc(remarkCBC(m.summary.averageGrade))}</b></span>`:m.summary.best6Count>=6?`TOTAL MARKS (Best 6): <b>${m.summary.best6}/600</b><span>SAT: <b>${m.summary.sat}/${m.summary.total}</b> • POINTS: <b>${m.summary.points}</b> • DIVISION: <b>${esc(m.summary.division)}</b></span>`:`TOTAL MARKS (${m.summary.best6Count} subjects): <b>${m.summary.best6}</b><span>GRADE POINTS: <b>${m.summary.points}</b> • DIVISION: <b>Pending until 6 subjects</b></span>`}</div>
       <div class="old-comment"><b>Class Teacher's Comment:</b><p>${esc(comment)}</p></div>
+      ${schoolCalendarLabel(d)?`<div class="school-calendar-report"><b>${esc(schoolCalendarLabel(d))}</b></div>`:''}
       <div class="old-signatures"><div><span>${esc(d.class?.teacherName||d.user?.name||'')}</span><i></i><small>Class Teacher${d.class?.teacherPhone?` • ${esc(d.class.teacherPhone)}`:''}</small></div><div><span>&nbsp;</span><i></i><small>Date</small></div></div>
       <div class="report-footer">Reportform ZM • ${esc(d.class.gradingSystem)} grading</div>
     </div>`;
@@ -375,7 +448,8 @@
     if(!m.summary.complete)doc.text(`RESULT STATUS: INCOMPLETE (${m.summary.completedCount}/${m.summary.total} subjects checked)`,12,y);
     else if(d.class.gradingSystem==='CBC'){doc.text(`OVERALL AVERAGE: ${m.summary.average}%   SAT: ${m.summary.sat}/${m.summary.total}`,12,y);const rightText=`CBC AVG GRADE: Grade ${m.summary.averageGrade} - ${remarkCBC(m.summary.averageGrade)}`;doc.text(rightText,198-doc.getTextWidth(rightText),y);}
     else if(m.summary.best6Count>=6){doc.text(`TOTAL MARKS (Best 6): ${m.summary.best6} / 600   SAT: ${m.summary.sat}/${m.summary.total}`,12,y);const rightText=`POINTS: ${m.summary.points}   DIVISION: ${m.summary.division}`;doc.text(rightText,198-doc.getTextWidth(rightText),y);}else{doc.text(`TOTAL MARKS (${m.summary.best6Count} subjects): ${m.summary.best6}`,12,y);const rightText=`POINTS: ${m.summary.points}   DIVISION: PENDING`;doc.text(rightText,198-doc.getTextWidth(rightText),y);}
-    y+=7;doc.setDrawColor(180);doc.line(12,y,198,y);y+=6;doc.setFont('helvetica','bold');doc.setFontSize(9);doc.text("Class Teacher's Comment:",12,y);y+=5;doc.setFont('helvetica','normal');doc.setFontSize(8.6);const lines=doc.splitTextToSize(teacherComment(d,p,m),186);doc.text(lines.slice(0,13),12,y);y+=Math.min(lines.length,13)*4+6;
+    y+=7;doc.setDrawColor(180);doc.line(12,y,198,y);y+=6;doc.setFont('helvetica','bold');doc.setFontSize(9);doc.text("Class Teacher's Comment:",12,y);y+=5;doc.setFont('helvetica','normal');doc.setFontSize(8.6);const lines=doc.splitTextToSize(teacherComment(d,p,m),186);doc.text(lines.slice(0,13),12,y);y+=Math.min(lines.length,13)*4+5;
+    const cal=schoolCalendarLabel(d);if(cal){doc.setFont('helvetica','bold');doc.setFontSize(8.4);doc.setTextColor(30,64,175);doc.text(cal,12,Math.min(y,250));y+=5;doc.setTextColor(0);}
     doc.setFontSize(8);doc.text(String(d.class?.teacherName||d.user?.name||''),15,Math.min(y,257));if(d.class?.teacherPhone){doc.setFontSize(7.2);doc.setTextColor(80);doc.text(String(d.class.teacherPhone),15,Math.min(y+3.5,260));doc.setTextColor(0);}const sy=Math.min(y+6,263);doc.setDrawColor(0);doc.line(15,sy,78,sy);doc.line(120,sy,180,sy);doc.text('Class Teacher',15,sy+4);doc.text('Date',120,sy+4);
     doc.setFontSize(7.5);doc.setTextColor(80);doc.text(`Reportform ZM • ${d.class.gradingSystem} • ${pageNo}`,198,280,{align:'right'});
   }
@@ -384,7 +458,7 @@
   async function downloadOne(id){try{const p=state.me.pupils.find(x=>x.id===id);if(!p)return;const doc=await buildDoc([p]);doc.save(`${state.me.class.name}_${p.name.replace(/\s+/g,'_')}_${state.me.assessment.name.replace(/\s+/g,'_')}_${state.me.class.academicYear||''}.pdf`);}catch(e){toast(e.message,true);}}
   async function downloadAll(){try{const doc=await buildDoc(state.me.pupils);doc.save(`${state.me.class.name}_${state.me.assessment.name.replace(/\s+/g,'_')}_Reports.pdf`);}catch(e){toast(e.message,true);}}
   function normalizeWhatsAppPhone(value){let x=String(value||'').replace(/\D/g,'');if(x.startsWith('00'))x=x.slice(2);if(x.startsWith('0'))x='260'+x.slice(1);return x;}
-  async function shareOne(id){const p=state.me.pupils.find(x=>x.id===id);if(!p)return;try{const doc=await buildDoc([p]),blob=doc.output('blob'),file=new File([blob],`${state.me.class.name}_${p.name.replace(/\s+/g,'_')}_${state.me.assessment.name.replace(/\s+/g,'_')}_${state.me.class.academicYear||''}.pdf`,{type:'application/pdf'}),message=`${state.me.class.schoolName} — ${state.me.assessment.name}, ${state.me.class.term||''} ${state.me.class.academicYear||''} report for ${p.name}.`;if(navigator.share&&(!navigator.canShare||navigator.canShare({files:[file]}))){await navigator.share({files:[file],title:`${p.name} - Pupil Report`,text:message});return;}doc.save(file.name);const phone=normalizeWhatsAppPhone(p.parentPhone),url=`https://wa.me/${phone}?text=${encodeURIComponent(message+' The PDF has been downloaded; please attach it to this WhatsApp message.')}`;const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';document.body.appendChild(link);link.click();link.remove();toast('PDF downloaded. WhatsApp opened — attach the downloaded report.');}catch(e){if(e.name!=='AbortError')toast(e.message,true);}}
+  async function shareOne(id){const p=state.me.pupils.find(x=>x.id===id);if(!p)return;try{const doc=await buildDoc([p]),blob=doc.output('blob'),file=new File([blob],`${state.me.class.name}_${p.name.replace(/\s+/g,'_')}_${state.me.assessment.name.replace(/\s+/g,'_')}_${state.me.class.academicYear||''}.pdf`,{type:'application/pdf'}),message=`${state.me.class.schoolName} — ${state.me.assessment.name}, ${state.me.class.term||''} ${state.me.class.academicYear||''} report for ${p.name}.${schoolCalendarLabel(state.me)?` ${schoolCalendarLabel(state.me)}.`:''}`;if(navigator.share&&(!navigator.canShare||navigator.canShare({files:[file]}))){await navigator.share({files:[file],title:`${p.name} - Pupil Report`,text:message});return;}doc.save(file.name);const phone=normalizeWhatsAppPhone(p.parentPhone),url=`https://wa.me/${phone}?text=${encodeURIComponent(message+' The PDF has been downloaded; please attach it to this WhatsApp message.')}`;const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';document.body.appendChild(link);link.click();link.remove();toast('PDF downloaded. WhatsApp opened — attach the downloaded report.');}catch(e){if(e.name!=='AbortError')toast(e.message,true);}}
 
   bootstrap().catch(err=>{app.innerHTML=`<div class="auth-page"><div class="auth-card"><h2>Reportform ZM could not open</h2><p>${esc(err.message||err)}</p><button class="btn primary full" onclick="location.reload()">Try again</button></div></div>`;});
 })();
