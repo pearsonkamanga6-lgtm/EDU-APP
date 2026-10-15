@@ -6,470 +6,304 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.0.7';
+const APP_VERSION = '3.1.2';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
-const DATA_FILE = path.join(DATA_DIR, 'simple-class-teacher.json');
+const WORKSPACE_DIR = path.join(DATA_DIR, 'workspaces');
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
-const TOKEN_SECRET = process.env.TOKEN_SECRET || 'DEV_ONLY_CHANGE_ME_reportform_zm_v3';
-const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7;
+const DATABASE_URL = String(process.env.DATABASE_URL || '').trim();
+let Pool = null; if (DATABASE_URL) ({ Pool } = require('pg'));
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-4o-mini').trim();
 const OPENAI_API_URL = String(process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions').trim();
+const BASE_ASSESSMENT_NAMES = ['Week 4 Assessment','Week 8 Assessment','End of Term Test'];
+const GRADE12_EXTRA_ASSESSMENTS = ['Pre-Mock Exam','Mock Exam','Post-Mock Exam'];
+const ASSESSMENT_NAMES = [...BASE_ASSESSMENT_NAMES,...GRADE12_EXTRA_ASSESSMENTS];
+const COOKIE_NAME = 'reportform_workspace';
+const COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 2;
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
 const nowIso = () => new Date().toISOString();
-const id = prefix => `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
-const validPin = pin => /^\d{4,}$/.test(String(pin || '').trim());
+const id = prefix => `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(5).toString('hex')}`;
 const normalizeGradingSystem = value => ['OBC','LEGACY'].includes(String(value || '').trim().toUpperCase()) ? 'OBC' : 'CBC';
 const normalizeSchoolType = value => ['DAY','BOARDING'].includes(String(value||'').trim().toUpperCase()) ? String(value).trim().toUpperCase() : '';
-const ASSESSMENT_NAMES = ['Week 4 Assessment','Week 8 Assessment','End of Term Test'];
 const normalizeAssessmentName = value => ASSESSMENT_NAMES.includes(String(value||'').trim()) ? String(value).trim() : 'Week 4 Assessment';
+const normalizeGradeLevel = value => {
+  const v=String(value||'').trim().toUpperCase().replace(/[^A-Z0-9]/g,'');
+  if(['FORM1','FORM2','GRADE10','GRADE11','GRADE12'].includes(v)) return v;
+  return 'OTHER';
+};
+const normalizeStream = value => String(value||'').trim().toUpperCase().replace(/[^A-Z0-9-]/g,'').slice(0,8);
+function parseClassParts(value){
+  const raw=String(value||'').trim(); let m;
+  if((m=raw.match(/^FORM\s*1\s*([A-Z0-9-]+)?$/i))) return {gradeLevel:'FORM1',stream:normalizeStream(m[1]||'')};
+  if((m=raw.match(/^FORM\s*2\s*([A-Z0-9-]+)?$/i))) return {gradeLevel:'FORM2',stream:normalizeStream(m[1]||'')};
+  if((m=raw.match(/^(?:GRADE\s*)?(10|11|12)\s*([A-Z0-9-]+)?$/i))) return {gradeLevel:`GRADE${m[1]}`,stream:normalizeStream(m[2]||'')};
+  return {gradeLevel:'OTHER',stream:''};
+}
+function classNameFromParts(gradeLevel,stream,custom=''){
+  const g=normalizeGradeLevel(gradeLevel),st=normalizeStream(stream);
+  if(g==='FORM1') return `Form 1${st}`.trim();
+  if(g==='FORM2') return `Form 2${st}`.trim();
+  if(g==='GRADE10') return `10${st}`.trim();
+  if(g==='GRADE11') return `11${st}`.trim();
+  if(g==='GRADE12') return `12${st}`.trim();
+  return String(custom||'').trim();
+}
+const isGrade12Class = (className,gradeLevel='') => normalizeGradeLevel(gradeLevel)==='GRADE12' || parseClassParts(className).gradeLevel==='GRADE12';
+const assessmentNamesForClass = (className,gradeLevel='') => isGrade12Class(className,gradeLevel) ? ASSESSMENT_NAMES : BASE_ASSESSMENT_NAMES;
+const normalizeAssessmentForClass = (value,className,gradeLevel='') => { const name=normalizeAssessmentName(value); return assessmentNamesForClass(className,gradeLevel).includes(name)?name:'Week 4 Assessment'; };
 const normalizeTerm = value => ['Term 1','Term 2','Term 3'].includes(String(value||'').trim()) ? String(value).trim() : 'Term 1';
 const normalizeAcademicYear = value => { const n=Number(value); return Number.isInteger(n)&&n>=2020&&n<=2100 ? String(n) : String(new Date().getFullYear()); };
-
-function hashPin(pin) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(String(pin), salt, 64).toString('hex');
-  return `${salt}:${hash}`;
-}
-
-function verifyPin(pin, stored) {
-  try {
-    const [salt, hash] = String(stored || '').split(':');
-    const got = crypto.scryptSync(String(pin), salt, 64);
-    const expected = Buffer.from(hash, 'hex');
-    return expected.length === got.length && crypto.timingSafeEqual(expected, got);
-  } catch { return false; }
-}
-
-function signToken(payload) {
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = crypto.createHmac('sha256', TOKEN_SECRET).update(body).digest('base64url');
-  return `${body}.${sig}`;
-}
-
-function issueToken(userId) {
-  const now = Math.floor(Date.now() / 1000);
-  return signToken({ userId, iat: now, exp: now + TOKEN_TTL_SECONDS });
-}
-
-function readToken(token) {
-  if (!token || !token.includes('.')) return null;
-  try {
-    const [body, sig] = token.split('.');
-    const expected = crypto.createHmac('sha256', TOKEN_SECRET).update(body).digest('base64url');
-    const a = Buffer.from(sig); const b = Buffer.from(expected);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-    if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) return null;
-    return payload;
-  } catch { return null; }
-}
+const normalizeSchoolDateType = value => ['OPENS','CLOSES'].includes(String(value||'').trim().toUpperCase()) ? String(value).trim().toUpperCase() : '';
+const normalizeSchoolDate = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value||'').trim()) ? String(value).trim() : '';
 
 function emptyDb() {
-  return { schema:'simple-class-teacher-v1', version:1, users:[], classes:[], subjects:[], pupils:[], assessments:[], marks:{}, updatedAt:nowIso() };
+  return { schema:'simple-class-teacher-v2', version:2, users:[], classes:[], subjects:[], pupils:[], assessments:[], marks:{}, updatedAt:nowIso() };
 }
 
-function loadDb() {
-  try {
-    const x = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    return x && x.schema === 'simple-class-teacher-v1' ? x : emptyDb();
-  } catch { return emptyDb(); }
-}
-
-let db = loadDb();
-function saveDb() {
+function migrateDb(input) {
+  const db = input && typeof input === 'object' ? input : emptyDb();
+  db.schema = 'simple-class-teacher-v2'; db.version = 2;
+  db.users = Array.isArray(db.users) ? db.users : [];
+  db.classes = Array.isArray(db.classes) ? db.classes : [];
+  db.subjects = Array.isArray(db.subjects) ? db.subjects : [];
+  db.pupils = Array.isArray(db.pupils) ? db.pupils : [];
+  db.assessments = Array.isArray(db.assessments) ? db.assessments : [];
+  db.marks = db.marks && typeof db.marks === 'object' ? db.marks : {};
+  for (const cls of db.classes) {
+    cls.gradingSystem = normalizeGradingSystem(cls.gradingSystem);
+    cls.schoolType = normalizeSchoolType(cls.schoolType);
+    cls.term = normalizeTerm(cls.term);
+    cls.academicYear = normalizeAcademicYear(cls.academicYear);
+    const parsedClass=parseClassParts(cls.name);
+    cls.gradeLevel=normalizeGradeLevel(cls.gradeLevel||parsedClass.gradeLevel);
+    cls.stream=normalizeStream(cls.stream||parsedClass.stream);
+    if (cls.teacherName === undefined) cls.teacherName = '';
+    if (cls.teacherPhone === undefined) cls.teacherPhone = '';
+  }
+  for (const a of db.assessments) {
+    a.name = normalizeAssessmentName(a.name);
+    a.term = normalizeTerm(a.term);
+    a.academicYear = normalizeAcademicYear(a.academicYear);
+    a.schoolDateType = normalizeSchoolDateType(a.schoolDateType);
+    a.schoolDate = normalizeSchoolDate(a.schoolDate);
+  }
+  for (const p of db.pupils) {
+    if (!p.firstName && !p.surname && p.name) {
+      const parts=String(p.name).trim().split(/\s+/).filter(Boolean); p.firstName=parts.shift()||''; p.surname=parts.join(' ');
+    }
+    p.comments = p.comments && typeof p.comments === 'object' ? p.comments : {};
+  }
   db.updatedAt = nowIso();
-  const tmp = `${DATA_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
-  fs.renameSync(tmp, DATA_FILE);
+  return db;
 }
 
-let gradingMigrated = false;
-for (const cls of db.classes || []) {
-  if (String(cls.gradingSystem || '').toUpperCase() === 'LEGACY') { cls.gradingSystem = 'OBC'; gradingMigrated = true; }
+function parseCookies(req){
+  const out={}; for(const part of String(req.headers.cookie||'').split(';')){const i=part.indexOf('=');if(i>0)out[part.slice(0,i).trim()]=decodeURIComponent(part.slice(i+1).trim());} return out;
 }
-if (gradingMigrated) saveDb();
-
-let pupilNameMigrated = false;
-for (const p of db.pupils || []) {
-  if (!p.firstName && !p.surname && p.name) {
-    const parts = String(p.name).trim().split(/\s+/).filter(Boolean);
-    p.firstName = parts.shift() || '';
-    p.surname = parts.join(' ');
-    pupilNameMigrated = true;
+function workspaceKeyFor(req,res){
+  const cookies=parseCookies(req); let key=String(cookies[COOKIE_NAME]||'');
+  if(!/^[a-f0-9]{48}$/.test(key)){
+    key=crypto.randomBytes(24).toString('hex');
+    const secure=String(req.headers['x-forwarded-proto']||'').toLowerCase().includes('https');
+    const cookie=`${COOKIE_NAME}=${key}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}${secure?'; Secure':''}`;
+    res.setHeader('Set-Cookie',cookie);
   }
-}
-if (pupilNameMigrated) saveDb();
-
-function safeUser(u) {
-  if (!u) return null;
-  const { pinHash, ...rest } = u;
-  return rest;
+  return key;
 }
 
-function sendJson(res, status, obj) {
-  const body = JSON.stringify(obj);
-  res.writeHead(status, { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store' });
-  res.end(body);
-}
-function sendError(res, status, error) { sendJson(res, status, { error }); }
-function readJson(req) {
-  return new Promise((resolve, reject) => {
-    let raw='';
-    req.on('data', c => { raw += c; if (raw.length > 2_000_000) req.destroy(); });
-    req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { reject(new Error('Invalid JSON')); } });
-    req.on('error', reject);
-  });
+let pool = null;
+let storageMode = 'local';
+const localQueues = new Map();
+
+async function initStorage(){
+  if(!DATABASE_URL){storageMode='local';return;}
+  pool=new Pool({connectionString:DATABASE_URL,max:Number(process.env.PG_POOL_MAX||10),idleTimeoutMillis:30000,connectionTimeoutMillis:10000});
+  await pool.query(`CREATE TABLE IF NOT EXISTS reportform_workspaces (
+    workspace_key TEXT PRIMARY KEY,
+    data JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await pool.query('SELECT 1');
+  storageMode='postgresql';
 }
 
-function authUser(req) {
-  const h = String(req.headers.authorization || '');
-  const token = h.startsWith('Bearer ') ? h.slice(7) : '';
-  const payload = readToken(token);
-  if (!payload) return null;
-  return db.users.find(u => u.id === payload.userId && u.active !== false) || null;
-}
+function localFileFor(key){return path.join(WORKSPACE_DIR,crypto.createHash('sha256').update(key).digest('hex')+'.json');}
+function readLocal(key){try{return migrateDb(JSON.parse(fs.readFileSync(localFileFor(key),'utf8')));}catch{return emptyDb();}}
+function writeLocal(key,db){db.updatedAt=nowIso();const file=localFileFor(key),tmp=file+'.tmp';fs.writeFileSync(tmp,JSON.stringify(db,null,2));fs.renameSync(tmp,file);}
 
-function userClass(userId) { return db.classes.find(c => c.teacherUserId === userId) || null; }
-function userAssessment(userId) {
-  const c=userClass(userId); if(!c) return null;
-  if(c.activeAssessmentId){const byId=db.assessments.find(a=>a.id===c.activeAssessmentId&&a.classId===c.id);if(byId)return byId;}
-  const desired=String(c.activeAssessmentName||'').trim(),term=normalizeTerm(c.term),year=normalizeAcademicYear(c.academicYear);
-  if(desired){const hit=db.assessments.find(a=>a.classId===c.id&&a.name===desired&&normalizeTerm(a.term)===term&&normalizeAcademicYear(a.academicYear)===year);if(hit)return hit;}
-  return db.assessments.find(a=>a.classId===c.id) || null;
-}
-function ensureAssessment(cls,name,term=cls.term,academicYear=cls.academicYear){
-  const assessmentName=normalizeAssessmentName(name),assessmentTerm=normalizeTerm(term),assessmentYear=normalizeAcademicYear(academicYear);
-  let a=db.assessments.find(x=>x.classId===cls.id&&x.name===assessmentName&&normalizeTerm(x.term)===assessmentTerm&&normalizeAcademicYear(x.academicYear)===assessmentYear);
-  if(!a){a={id:id('assess'),classId:cls.id,name:assessmentName,term:assessmentTerm,academicYear:assessmentYear,createdAt:nowIso()};db.assessments.push(a);}
-  a.term=assessmentTerm;a.academicYear=assessmentYear;cls.activeAssessmentId=a.id;cls.activeAssessmentName=assessmentName;
-  return a;
-}
-function classSubjects(classId) { return db.subjects.filter(s => s.classId === classId && s.active !== false); }
-function classPupils(classId) { return db.pupils.filter(p => p.classId === classId && p.active !== false); }
-function markKey(assessmentId,pupilId,subjectId){ return `${assessmentId}:${pupilId}:${subjectId}`; }
-
-function standaloneUser(){
-  let user=(db.users||[]).find(u=>u.active!==false && userClass(u.id)) || (db.users||[]).find(u=>u.active!==false) || null;
-  let changed=false;
-  if(!user){
-    user={id:id('usr'),name:'',phone:'',identifier:'standalone',active:true,createdAt:nowIso()};
-    db.users.push(user);changed=true;
+async function withWorkspace(key,fn){
+  if(storageMode==='postgresql'){
+    const client=await pool.connect();
+    try{
+      await client.query('BEGIN');
+      await client.query('INSERT INTO reportform_workspaces(workspace_key,data) VALUES($1,$2::jsonb) ON CONFLICT (workspace_key) DO NOTHING',[key,JSON.stringify(emptyDb())]);
+      const r=await client.query('SELECT data FROM reportform_workspaces WHERE workspace_key=$1 FOR UPDATE',[key]);
+      const db=migrateDb(r.rows[0]?.data||emptyDb());
+      const result=await fn(db);
+      db.updatedAt=nowIso();
+      await client.query('UPDATE reportform_workspaces SET data=$2::jsonb, updated_at=NOW() WHERE workspace_key=$1',[key,JSON.stringify(db)]);
+      await client.query('COMMIT');
+      return result;
+    }catch(err){try{await client.query('ROLLBACK');}catch{} throw err;}finally{client.release();}
   }
-  let cls=userClass(user.id);
-  if(!cls){
-    cls={id:id('cls'),teacherUserId:user.id,teacherName:user.name||'',teacherPhone:user.phone||'',schoolName:'',schoolType:'',name:'',gradingSystem:'CBC',term:'Term 1',academicYear:String(new Date().getFullYear()),activeAssessmentName:'Week 4 Assessment',createdAt:nowIso()};
-    db.classes.push(cls);changed=true;
-  } else {
-    if(cls.teacherName===undefined){cls.teacherName=user.name||'';changed=true;}
-    if(cls.teacherPhone===undefined){cls.teacherPhone=user.phone||'';changed=true;}
-    if(cls.schoolType===undefined){cls.schoolType='';changed=true;}
-    if(!cls.term){cls.term='Term 1';changed=true;}
-    if(!cls.academicYear){cls.academicYear=String(new Date().getFullYear());changed=true;}
-  }
-  const existing=db.assessments.filter(a=>a.classId===cls.id);
-  for(const a of existing){if(!a.term){a.term=cls.term;changed=true;}if(!a.academicYear){a.academicYear=cls.academicYear;changed=true;}}
-  if(existing.length===1 && !ASSESSMENT_NAMES.includes(existing[0].name)){
-    existing[0].name='Week 4 Assessment';cls.activeAssessmentId=existing[0].id;cls.activeAssessmentName='Week 4 Assessment';changed=true;
-  }
-  let assessment=userAssessment(user.id);
-  if(!assessment || !ASSESSMENT_NAMES.includes(assessment.name)){
-    assessment=ensureAssessment(cls,'Week 4 Assessment');changed=true;
-  } else if(!cls.activeAssessmentId){cls.activeAssessmentId=assessment.id;cls.activeAssessmentName=assessment.name;changed=true;}
-  for(const p of classPupils(cls.id)){
-    if(!p.comments || typeof p.comments!=='object'){p.comments={};changed=true;}
-    if(p.classTeacherComment && Object.keys(p.comments).length===0){p.comments[assessment.id]=String(p.classTeacherComment);p.classTeacherComment='';changed=true;}
-  }
-  if(changed)saveDb();
-  return user;
+  const prev=localQueues.get(key)||Promise.resolve();
+  const run=prev.catch(()=>{}).then(async()=>{const db=readLocal(key);const result=await fn(db);writeLocal(key,db);return result;});
+  const tracked=run.finally(()=>{if(localQueues.get(key)===tracked)localQueues.delete(key);});
+  localQueues.set(key,tracked);
+  return run;
 }
 
-function cleanMark(value) {
-  if (String(value||'').trim().toUpperCase() === 'ABSENT') return 'ABSENT';
-  if (value === null || value === undefined || value === '') return null;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0 || n > 100) throw new Error('Marks must be between 0 and 100');
-  return Math.round(n * 10) / 10;
+async function readWorkspace(key,fn){
+  if(storageMode==='postgresql'){
+    const r=await pool.query('SELECT data FROM reportform_workspaces WHERE workspace_key=$1',[key]);
+    const db=migrateDb(r.rows[0]?.data||emptyDb()); return fn(db);
+  }
+  return fn(readLocal(key));
 }
 
+function safeUser(u){if(!u)return null;const {pinHash,...rest}=u;return rest;}
+function sendJson(res,status,obj){const body=JSON.stringify(obj);res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(body);}
+function sendError(res,status,error){sendJson(res,status,{error});}
+function readJson(req){return new Promise((resolve,reject)=>{let raw='';req.on('data',c=>{raw+=c;if(raw.length>2_000_000)req.destroy();});req.on('end',()=>{try{resolve(raw?JSON.parse(raw):{});}catch{reject(new Error('Invalid JSON'));}});req.on('error',reject);});}
+
+function ctx(db){
+  const userClass=userId=>db.classes.find(c=>c.teacherUserId===userId)||null;
+  const classSubjects=classId=>db.subjects.filter(s=>s.classId===classId&&s.active!==false);
+  const classPupils=classId=>db.pupils.filter(p=>p.classId===classId&&p.active!==false);
+  const markKey=(assessmentId,pupilId,subjectId)=>`${assessmentId}:${pupilId}:${subjectId}`;
+  function userAssessment(userId){
+    const c=userClass(userId);if(!c)return null;
+    if(c.activeAssessmentId){const byId=db.assessments.find(a=>a.id===c.activeAssessmentId&&a.classId===c.id);if(byId)return byId;}
+    const desired=String(c.activeAssessmentName||'').trim(),term=normalizeTerm(c.term),year=normalizeAcademicYear(c.academicYear);
+    if(desired){const hit=db.assessments.find(a=>a.classId===c.id&&a.name===desired&&normalizeTerm(a.term)===term&&normalizeAcademicYear(a.academicYear)===year);if(hit)return hit;}
+    return db.assessments.find(a=>a.classId===c.id)||null;
+  }
+  function ensureAssessment(cls,name,term=cls.term,academicYear=cls.academicYear,inheritFrom=null){
+    const assessmentName=normalizeAssessmentForClass(name,cls.name,cls.gradeLevel),assessmentTerm=normalizeTerm(term),assessmentYear=normalizeAcademicYear(academicYear);
+    let a=db.assessments.find(x=>x.classId===cls.id&&x.name===assessmentName&&normalizeTerm(x.term)===assessmentTerm&&normalizeAcademicYear(x.academicYear)===assessmentYear);
+    if(!a){a={id:id('assess'),classId:cls.id,name:assessmentName,term:assessmentTerm,academicYear:assessmentYear,schoolDateType:inheritFrom?.schoolDateType||'',schoolDate:inheritFrom?.schoolDate||'',createdAt:nowIso()};db.assessments.push(a);}
+    a.term=assessmentTerm;a.academicYear=assessmentYear;a.schoolDateType=normalizeSchoolDateType(a.schoolDateType);a.schoolDate=normalizeSchoolDate(a.schoolDate);cls.activeAssessmentId=a.id;cls.activeAssessmentName=assessmentName;return a;
+  }
+  function standaloneUser(){
+    let user=(db.users||[]).find(u=>u.active!==false&&userClass(u.id))||(db.users||[]).find(u=>u.active!==false)||null;
+    if(!user){user={id:id('usr'),name:'',phone:'',identifier:'workspace',active:true,createdAt:nowIso()};db.users.push(user);}
+    let cls=userClass(user.id);
+    if(!cls){cls={id:id('cls'),teacherUserId:user.id,teacherName:'',teacherPhone:'',schoolName:'',schoolType:'',name:'',gradeLevel:'OTHER',stream:'',gradingSystem:'CBC',term:'Term 1',academicYear:String(new Date().getFullYear()),activeAssessmentName:'Week 4 Assessment',createdAt:nowIso()};db.classes.push(cls);}
+    let assessment=userAssessment(user.id);
+    if(!assessment||!assessmentNamesForClass(cls.name,cls.gradeLevel).includes(assessment.name))assessment=ensureAssessment(cls,'Week 4 Assessment');
+    for(const p of classPupils(cls.id)){p.comments=p.comments&&typeof p.comments==='object'?p.comments:{};if(p.classTeacherComment&&Object.keys(p.comments).length===0){p.comments[assessment.id]=String(p.classTeacherComment);p.classTeacherComment='';}}
+    return user;
+  }
+  return{db,userClass,classSubjects,classPupils,markKey,userAssessment,ensureAssessment,standaloneUser};
+}
+
+function cleanMark(value){if(String(value||'').trim().toUpperCase()==='ABSENT')return'ABSENT';if(value===null||value===undefined||value==='')return null;const n=Number(value);if(!Number.isFinite(n)||n<0||n>100)throw new Error('Marks must be between 0 and 100');return Math.round(n*10)/10;}
 function gradeCBC(mark){const n=Number(mark);return n>=70?1:n>=60?2:n>=50?3:n>=40?4:5;}
 function remarkCBC(g){return ['','Outstanding','Advanced','Basic','Satisfactory','Unsatisfactory'][g]||'';}
 function gradeOBC(mark){const n=Number(mark);return n>=75?1:n>=70?2:n>=65?3:n>=60?4:n>=55?5:n>=50?6:n>=45?7:n>=40?8:9;}
 function remarkOBC(g){return g===1?'Excellent':g===2?'Very Good':g<=4?'Good':g<=6?'Satisfactory':g<=8?'Fair':'Fail';}
 function pronouns(sex){const s=String(sex||'').toUpperCase();if(s==='F')return{subj:'She',subjL:'she',obj:'her',poss:'her'};if(s==='M')return{subj:'He',subjL:'he',obj:'him',poss:'his'};return{subj:'The learner',subjL:'the learner',obj:'the learner',poss:'their'};}
+function humanDate(value){if(!/^\d{4}-\d{2}-\d{2}$/.test(String(value||'')))return'';const[y,m,d]=String(value).split('-').map(Number);return new Date(y,m-1,d).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});}
+function schoolCalendarText(a){if(!a?.schoolDateType||!a?.schoolDate)return'';return `School ${a.schoolDateType==='OPENS'?'opens':'closes'} on ${humanDate(a.schoolDate)}`;}
 
-function pupilReportSnapshot(user,pupil){
-  const cls=userClass(user.id), assessment=userAssessment(user.id);
-  if(!cls||!assessment) return null;
-  const subjects=classSubjects(cls.id), isCBC=cls.gradingSystem==='CBC';
-  const rows=subjects.map(s=>{
-    const raw=db.marks[markKey(assessment.id,pupil.id,s.id)], absent=raw==='ABSENT';
-    const has=!absent&&raw!==null&&raw!==undefined&&raw!==''&&Number.isFinite(Number(raw));
-    const visited=absent||has, mark=has?Number(raw):null, grade=has?(isCBC?gradeCBC(mark):gradeOBC(mark)):null;
-    return {subject:s.name,mark,grade,status:absent?'absent':has?'mark':'pending',visited,remark:absent?'Absent / Did not write':has?(isCBC?remarkCBC(grade):remarkOBC(grade)):'Pending'};
-  });
-  const entered=rows.filter(r=>r.status==='mark'), completed=rows.filter(r=>r.visited), absent=rows.filter(r=>r.status==='absent'), complete=completed.length===rows.length&&rows.length>0;
-  const strongest=[...entered].sort((a,b)=>b.mark-a.mark).slice(0,3), weakest=[...entered].sort((a,b)=>a.mark-b.mark).slice(0,3);
-  const summary={complete,entered:entered.length,sat:entered.length,completedCount:completed.length,absentCount:absent.length,total:rows.length};
+function pupilReportSnapshot(db,user,pupil){
+  const c=ctx(db),cls=c.userClass(user.id),assessment=c.userAssessment(user.id);if(!cls||!assessment)return null;
+  const subjects=c.classSubjects(cls.id),isCBC=cls.gradingSystem==='CBC';
+  const rows=subjects.map(s=>{const raw=db.marks[c.markKey(assessment.id,pupil.id,s.id)],absent=raw==='ABSENT';const has=!absent&&raw!==null&&raw!==undefined&&raw!==''&&Number.isFinite(Number(raw));const visited=absent||has,mark=has?Number(raw):null,grade=has?(isCBC?gradeCBC(mark):gradeOBC(mark)):null;return{subject:s.name,mark,grade,status:absent?'absent':has?'mark':'pending',visited,remark:absent?'Absent / Did not write':has?(isCBC?remarkCBC(grade):remarkOBC(grade)):'Pending'};});
+  const entered=rows.filter(r=>r.status==='mark'),completed=rows.filter(r=>r.visited),absent=rows.filter(r=>r.status==='absent'),complete=completed.length===rows.length&&rows.length>0;const strongest=[...entered].sort((a,b)=>b.mark-a.mark).slice(0,3),weakest=[...entered].sort((a,b)=>a.mark-b.mark).slice(0,3);const summary={complete,entered:entered.length,sat:entered.length,completedCount:completed.length,absentCount:absent.length,total:rows.length};
   if(entered.length)summary.average=Math.round(entered.reduce((n,x)=>n+x.mark,0)/entered.length*10)/10;
   if(!isCBC&&entered.length){const best=[...entered].sort((a,b)=>b.mark-a.mark).slice(0,6);summary.best6Count=best.length;summary.best6=best.reduce((n,x)=>n+x.mark,0);summary.points=best.reduce((n,x)=>n+x.grade,0);if(best.length>=6)summary.division=summary.points<=12?'I':summary.points<=17?'II':summary.points<=24?'III':summary.points<=35?'IV':'FAIL';}
   if(isCBC&&entered.length)summary.averageGrade=gradeCBC(summary.average);
-  return {school:cls.schoolName,schoolType:cls.schoolType||'',className:cls.name,term:cls.term,academicYear:cls.academicYear,assessment:assessment.name,gradingSystem:cls.gradingSystem,pupil:{name:pupil.name,firstName:pupil.firstName,surname:pupil.surname,sex:pupil.sex,examNo:pupil.examNo},rows,summary,strongest,weakest,missing:rows.filter(r=>r.status==='pending').map(r=>r.subject),absent:rows.filter(r=>r.status==='absent').map(r=>r.subject)};
+  return{school:cls.schoolName,schoolType:cls.schoolType||'',className:cls.name,term:cls.term,academicYear:cls.academicYear,assessment:assessment.name,schoolDateType:assessment.schoolDateType||'',schoolDate:assessment.schoolDate||'',schoolCalendar:schoolCalendarText(assessment),gradingSystem:cls.gradingSystem,pupil:{name:pupil.name,firstName:pupil.firstName,surname:pupil.surname,sex:pupil.sex,examNo:pupil.examNo},rows,summary,strongest,weakest,missing:rows.filter(r=>r.status==='pending').map(r=>r.subject),absent:rows.filter(r=>r.status==='absent').map(r=>r.subject)};
 }
 
 function smartLocalComment(snapshot){
-  if(!snapshot) return 'Results are not available yet.';
-  const {pupil,summary,strongest,weakest,school,schoolType,assessment,gradingSystem,missing}=snapshot;
-  const name=pupil.name||'This pupil', pr=pronouns(pupil.sex), boarding=schoolType==='BOARDING', endTerm=assessment==='End of Term Test';
-  if(!summary.entered) return `Dear Parent/Guardian, results for ${name} have not yet been entered for ${assessment}. The report will be completed once the subject marks are available.`;
-  if(!summary.complete){const miss=missing.slice(0,3).join(', ');return `Dear Parent/Guardian, ${name}'s result record for ${assessment} is not yet complete. ${summary.completedCount} of ${summary.total} subjects have been checked${miss?`, while ${miss}${missing.length>3?' and other subjects':''} are still pending`:''}. A final overall judgement should be made after all required results are entered.`;}
-  const best=strongest[0], weak=weakest[0];
-  let text=`Dear Parent/Guardian, ${name} completed ${assessment} at ${school}. `;
-  if(gradingSystem==='CBC'){const g=gradeCBC(summary.average), desc=remarkCBC(g);text+=`${pr.subj} obtained an overall average of ${summary.average}%, which is CBC Grade ${g} (${desc}). `;}
-  else if(summary.best6Count>=6)text+=`${pr.subj} recorded a Best 6 total of ${summary.best6}/600, ${summary.points} grade points and Division ${summary.division}. `;else text+=`${pr.subj} obtained an average of ${summary.average}% across the ${summary.entered} subjects written. `;
+  if(!snapshot)return'Results are not available yet.';const{pupil,summary,strongest,weakest,school,schoolType,assessment,gradingSystem,missing,schoolCalendar}=snapshot;const name=pupil.name||'This pupil',pr=pronouns(pupil.sex),boarding=schoolType==='BOARDING',endTerm=assessment==='End of Term Test';
+  if(!summary.entered)return`Dear Parent/Guardian, results for ${name} have not yet been entered for ${assessment}. The report will be completed once the subject marks are available.`;
+  if(!summary.complete){const miss=missing.slice(0,3).join(', ');return`Dear Parent/Guardian, ${name}'s result record for ${assessment} is not yet complete. ${summary.completedCount} of ${summary.total} subjects have been checked${miss?`, while ${miss}${missing.length>3?' and other subjects':''} are still pending`:''}. A final overall judgement should be made after all required results are entered.`;}
+  const best=strongest[0],weak=weakest[0];let text=`Dear Parent/Guardian, ${name} completed ${assessment} at ${school}. `;
+  if(gradingSystem==='CBC'){const g=gradeCBC(summary.average);text+=`${pr.subj} obtained an overall average of ${summary.average}%, which is CBC Grade ${g} (${remarkCBC(g)}). `;}else if(summary.best6Count>=6)text+=`${pr.subj} recorded a Best 6 total of ${summary.best6}/600, ${summary.points} grade points and Division ${summary.division}. `;else text+=`${pr.subj} obtained an average of ${summary.average}% across the ${summary.entered} subjects written. `;
   if(best)text+=`${pr.subj} performed strongest in ${best.subject} with ${best.mark}%. `;
   if(weak&&(!best||weak.subject!==best.subject)){const weakDesc=gradingSystem==='CBC'?remarkCBC(gradeCBC(weak.mark)):`Grade ${gradeOBC(weak.mark)} (${remarkOBC(gradeOBC(weak.mark))})`;text+=`To strengthen the overall result, ${pr.subjL} should give more attention to ${weak.subject}, where the mark was ${weak.mark}%${weakDesc?` — ${weakDesc}`:''}. `;}
   if(boarding&&!endTerm)text+=`As ${name} is still at boarding school, please use the available calls, visits or messages to encourage ${pr.obj} to remain focused, revise consistently and seek help from subject teachers in weaker areas. `;
-  else if(boarding&&endTerm)text+=`As ${name} is now with you for the holiday, please continue encouraging ${pr.obj}, help ${pr.obj} maintain a simple revision routine and give particular attention to weaker subjects before school reopens. `;
+  else if(boarding&&endTerm)text+=`As ${name} is now with you for the holiday, please continue encouraging ${pr.obj}, help ${pr.obj} maintain a simple revision routine and give particular attention to weaker subjects${snapshot.schoolDateType==='OPENS'&&snapshot.schoolDate?` before school reopens on ${humanDate(snapshot.schoolDate)}`:' before school reopens'}. `;
   else if(endTerm)text+=`During the holiday, please continue encouraging ${pr.obj} to keep a balanced revision routine, correct mistakes from this assessment and prepare steadily for the next term. `;
   else text+=`Please continue supporting regular home revision, discussion of schoolwork and timely attention to weaker subjects before the next assessment. `;
-  text+=`Continued encouragement from both home and school can help strengthen the next result.`;
-  return text;
+  if(schoolCalendar)text+=`${schoolCalendar}. `;text+=`Continued encouragement from both home and school can help strengthen the next result.`;return text;
 }
 
 function aiSystemPrompt(snapshot){
-  const scale=snapshot.gradingSystem==='CBC'
-    ? 'CBC scale: 70-100 Grade 1 Outstanding; 60-69 Grade 2 Advanced; 50-59 Grade 3 Basic; 40-49 Grade 4 Satisfactory; 0-39 Grade 5 Unsatisfactory. Do not use Grade 6-9 or Division I-IV for CBC.'
-    : 'OBC scale: 75-100 Grade 1; 70-74 Grade 2; 65-69 Grade 3; 60-64 Grade 4; 55-59 Grade 5; 50-54 Grade 6; 45-49 Grade 7; 40-44 Grade 8; 0-39 Grade 9. Best 6 points determine the displayed division in the supplied data.';
-  const boarding=snapshot.schoolType==='BOARDING', endTerm=snapshot.assessment==='End of Term Test';
-  let context;
-  if(boarding&&!endTerm)context='This is a boarding school and this is a Week 4 or Week 8 progress assessment. The learner is still at school. Address the parent/guardian as someone who may have limited direct contact. Encourage them to use available calls, visits or messages to motivate the learner and to work with the school where support is needed. Do NOT tell the parent to supervise daily home study because the learner is still boarding.';
+  const scale=snapshot.gradingSystem==='CBC'?'CBC scale: 70-100 Grade 1 Outstanding; 60-69 Grade 2 Advanced; 50-59 Grade 3 Basic; 40-49 Grade 4 Satisfactory; 0-39 Grade 5 Unsatisfactory. Do not use Grade 6-9 or Division I-IV for CBC.':'OBC scale: 75-100 Grade 1; 70-74 Grade 2; 65-69 Grade 3; 60-64 Grade 4; 55-59 Grade 5; 50-54 Grade 6; 45-49 Grade 7; 40-44 Grade 8; 0-39 Grade 9. Best 6 points determine the displayed division in the supplied data.';
+  const boarding=snapshot.schoolType==='BOARDING',endTerm=snapshot.assessment==='End of Term Test',mockExam=/Mock Exam$/i.test(snapshot.assessment);let context;
+  if(boarding&&!endTerm)context=mockExam?'This is a boarding school and a Grade 12 mock-series examination. The learner is still at school. Address the parent/guardian as someone who may have limited direct contact. Encourage them to use available calls, visits or messages to motivate the learner and to work with the school where support is needed. Do NOT tell the parent to supervise daily home study because the learner is still boarding.':'This is a boarding school and this is a Week 4 or Week 8 progress assessment. The learner is still at school. Address the parent/guardian as someone who may have limited direct contact. Encourage them to use available calls, visits or messages to motivate the learner and to work with the school where support is needed. Do NOT tell the parent to supervise daily home study because the learner is still boarding.';
   else if(boarding&&endTerm)context='This is a boarding school and the End of Term Test. The learner is now with the parent/guardian for the holiday. Encourage the parent to continue motivating the learner at home, help maintain a realistic holiday revision routine, focus on weaker subjects, correct mistakes, and prepare for reopening while allowing reasonable rest.';
   else if(endTerm)context='This is a day school and the End of Term Test. The learner is with the family during the holiday. Encourage balanced holiday revision and preparation for the next term.';
   else context='This is a day school. The learner normally returns home daily. Encourage appropriate home support, regular revision and discussion of schoolwork without inventing family circumstances.';
-  return `You write class-teacher comments for Zambian school report forms. Produce one polished paragraph only, about 90-150 words. Make it natural, specific, parent-friendly, encouraging and professional. Analyse only the supplied pupil data: actual marks, strongest and weakest subjects, grading, Best 6/points/division when supplied, assessment, school type, genuinely missing marks and subjects marked absent. ${scale} ${context} Never invent attendance, discipline, conduct, improvement/decline over time, family circumstances or personal qualities that are not present in the data. If results are incomplete, say so tactfully and do not invent missing marks. Give practical advice based on weaker entered subjects. Do not use bullets, markdown, headings or quotation marks.`;
+  if(mockExam)context+=` This is a Grade 12 ${snapshot.assessment}. Treat it as an examination-readiness assessment: advise the parent/guardian to encourage correction of examination weaknesses, past-paper practice, time management and focused preparation for the next examination, without inventing readiness facts.`;
+  const calendar=snapshot.schoolCalendar?` The report states: ${snapshot.schoolCalendar}. Use this date naturally when relevant, especially for holiday/reopening advice, but do not repeat it awkwardly.`:'';
+  return`You write class-teacher comments for Zambian school report forms. Produce one polished paragraph only, about 90-150 words. Make it natural, specific, parent-friendly, encouraging and professional. Analyse only the supplied pupil data: actual marks, strongest and weakest subjects, grading, Best 6/points/division when supplied, assessment, school type, genuinely missing marks and subjects marked absent. ${scale} ${context}${calendar} Never invent attendance, discipline, conduct, improvement/decline over time, family circumstances or personal qualities that are not present in the data. If results are incomplete, say so tactfully and do not invent missing marks. Give practical advice based on weaker entered subjects. Do not use bullets, markdown, headings or quotation marks.`;
 }
+async function generateOnlineComment(snapshot){if(!OPENAI_API_KEY)return null;const res=await fetch(OPENAI_API_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}`},body:JSON.stringify({model:OPENAI_MODEL,messages:[{role:'system',content:aiSystemPrompt(snapshot)},{role:'user',content:`Generate one class teacher comment for this report form.\n\nPupil data:\n${JSON.stringify(snapshot,null,2)}`}],temperature:.7,max_tokens:260})});const raw=await res.text();let data;try{data=JSON.parse(raw);}catch{data={raw};}if(!res.ok)throw new Error(data?.error?.message||raw.slice(0,240)||`AI request failed (${res.status})`);const content=data?.choices?.[0]?.message?.content;if(typeof content==='string'&&content.trim())return content.replace(/^['"\s]+|['"\s]+$/g,'').trim();if(typeof data?.output_text==='string'&&data.output_text.trim())return data.output_text.trim();return null;}
 
-async function generateOnlineComment(snapshot){
-  if(!OPENAI_API_KEY) return null;
-  const res=await fetch(OPENAI_API_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}`},body:JSON.stringify({model:OPENAI_MODEL,messages:[{role:'system',content:aiSystemPrompt(snapshot)},{role:'user',content:`Generate one class teacher comment for this report form.\n\nPupil data:\n${JSON.stringify(snapshot,null,2)}`}],temperature:0.7,max_tokens:260})});
-  const raw=await res.text();
-  let data;try{data=JSON.parse(raw);}catch{data={raw};}
-  if(!res.ok) throw new Error(data?.error?.message||raw.slice(0,240)||`AI request failed (${res.status})`);
-  const content=data?.choices?.[0]?.message?.content;
-  if(typeof content==='string'&&content.trim()) return content.replace(/^['"\s]+|['"\s]+$/g,'').trim();
-  if(typeof data?.output_text==='string'&&data.output_text.trim()) return data.output_text.trim();
-  return null;
-}
+function stateForUser(db,user,workspaceKey){const c=ctx(db),cls=c.userClass(user.id),assessment=c.userAssessment(user.id),subjects=cls?c.classSubjects(cls.id):[],sourcePupils=cls?c.classPupils(cls.id):[],pupils=sourcePupils.map(p=>({...p,classTeacherComment:assessment?String(p.comments?.[assessment.id]||''):''})),marks={};if(assessment){for(const p of sourcePupils){marks[p.id]={};for(const s of subjects)marks[p.id][s.id]=db.marks[c.markKey(assessment.id,p.id,s.id)]??null;}}return{version:APP_VERSION,user:safeUser(user),class:cls,assessment,assessmentOptions:cls?assessmentNamesForClass(cls.name,cls.gradeLevel):BASE_ASSESSMENT_NAMES,subjects,pupils,marks,ai:{onlineConfigured:!!OPENAI_API_KEY},storage:{mode:storageMode,multiTeacherReady:storageMode==='postgresql',workspace:String(workspaceKey).slice(-8)}};}
 
-function stateForUser(user) {
-  const cls = userClass(user.id);
-  const assessment = userAssessment(user.id);
-  const subjects = cls ? classSubjects(cls.id) : [];
-  const sourcePupils = cls ? classPupils(cls.id) : [];
-  const pupils = sourcePupils.map(p=>({...p,classTeacherComment:assessment?String(p.comments?.[assessment.id]||''):''}));
-  const marks = {};
-  if (assessment) {
-    for (const p of sourcePupils) {
-      marks[p.id] = {};
-      for (const s of subjects) marks[p.id][s.id] = db.marks[markKey(assessment.id,p.id,s.id)] ?? null;
-    }
+async function workspaceApi(db,workspaceKey,req,urlObj){
+  const c=ctx(db),pathname=urlObj.pathname,user=c.standaloneUser();
+  if(req.method==='GET'&&(pathname==='/api/me'||pathname==='/api/class-data'))return{status:200,body:stateForUser(db,user,workspaceKey)};
+  if(req.method==='PUT'&&pathname==='/api/setup'){
+    const b=await readJson(req),cls=c.userClass(user.id);if(!cls)return{status:404,body:{error:'Class not found'}};
+    const teacherName=String(b.teacherName||'').trim(),teacherPhone=String(b.teacherPhone||'').trim(),schoolName=String(b.schoolName||'').trim();
+    const gradeLevel=normalizeGradeLevel(b.gradeLevel),stream=normalizeStream(b.stream),className=classNameFromParts(gradeLevel,stream,b.className),assessmentName=normalizeAssessmentForClass(b.assessmentName,className,gradeLevel),gradingSystem=normalizeGradingSystem(b.gradingSystem),schoolType=normalizeSchoolType(b.schoolType),term=normalizeTerm(b.term),academicYear=normalizeAcademicYear(b.academicYear),schoolDateType=normalizeSchoolDateType(b.schoolDateType),schoolDate=normalizeSchoolDate(b.schoolDate);
+    if(!teacherName||!teacherPhone||!schoolName||!className||!schoolType)return{status:400,body:{error:'Class teacher name, phone number, school, class and school type are required'}};
+    if(!schoolDateType||!schoolDate)return{status:400,body:{error:'Choose whether school opens or closes, then select the date'}};
+    user.name=teacherName;user.phone=teacherPhone;cls.teacherName=teacherName;cls.teacherPhone=teacherPhone;cls.schoolName=schoolName;cls.schoolType=schoolType;cls.name=className;cls.gradeLevel=gradeLevel;cls.stream=stream;cls.gradingSystem=gradingSystem;cls.term=term;cls.academicYear=academicYear;
+    const assessment=c.ensureAssessment(cls,assessmentName,term,academicYear,c.userAssessment(user.id));assessment.schoolDateType=schoolDateType;assessment.schoolDate=schoolDate;
+    return{status:200,body:stateForUser(db,user,workspaceKey)};
   }
-  return { version:APP_VERSION, user:safeUser(user), class:cls, assessment, assessmentOptions:ASSESSMENT_NAMES, subjects, pupils, marks, ai:{onlineConfigured:!!OPENAI_API_KEY} };
-}
-
-async function api(req,res,urlObj) {
-  const { pathname } = urlObj;
-  if (req.method === 'GET' && pathname === '/api/version') return sendJson(res,200,{version:APP_VERSION});
-
-  if (req.method === 'POST' && pathname === '/api/register') {
-    const b = await readJson(req);
-    const name = String(b.name||'').trim();
-    const identifier = String(b.identifier||'').trim().toLowerCase();
-    const pin = String(b.pin||'').trim();
-    const schoolName = String(b.schoolName||'').trim();
-    const className = String(b.className||'').trim();
-    const gradingSystem = normalizeGradingSystem(b.gradingSystem);
-    if (!name || !identifier || !schoolName || !className) return sendError(res,400,'Complete all required fields');
-    if (!validPin(pin)) return sendError(res,400,'PIN must contain numbers only and be at least 4 digits');
-    if (db.users.some(u => u.identifier === identifier)) return sendError(res,409,'That staff ID is already in use');
-    const user = { id:id('usr'), name, identifier, pinHash:hashPin(pin), active:true, createdAt:nowIso() };
-    const cls = { id:id('cls'), teacherUserId:user.id, schoolName, name:className, gradingSystem, term:'Term 1', academicYear:String(new Date().getFullYear()), activeAssessmentName:'Week 4 Assessment', createdAt:nowIso() };
-    const assessment = { id:id('assess'), classId:cls.id, name:'Week 4 Assessment', term:'Term 1', academicYear:String(new Date().getFullYear()), createdAt:nowIso() }; cls.activeAssessmentId=assessment.id;
-    db.users.push(user); db.classes.push(cls); db.assessments.push(assessment); saveDb();
-    return sendJson(res,201,{ token:issueToken(user.id), user:safeUser(user) });
+  if(req.method==='PUT'&&pathname==='/api/assessment'){
+    const b=await readJson(req),cls=c.userClass(user.id);if(!cls)return{status:404,body:{error:'Class not found'}};const previous=c.userAssessment(user.id),assessmentName=normalizeAssessmentForClass(b.assessmentName,cls.name,cls.gradeLevel),term=normalizeTerm(b.term||cls.term),academicYear=normalizeAcademicYear(b.academicYear||cls.academicYear);cls.term=term;cls.academicYear=academicYear;c.ensureAssessment(cls,assessmentName,term,academicYear,previous);return{status:200,body:stateForUser(db,user,workspaceKey)};
   }
-
-  if (req.method === 'POST' && pathname === '/api/login') {
-    const b = await readJson(req);
-    const identifier = String(b.identifier||'').trim().toLowerCase();
-    const pin = String(b.pin||'').trim();
-    if (!validPin(pin)) return sendError(res,400,'Enter a PIN of at least 4 numbers');
-    const user = db.users.find(u => u.identifier === identifier && u.active !== false);
-    if (!user || !verifyPin(pin,user.pinHash)) return sendError(res,401,'Incorrect staff ID or PIN');
-    return sendJson(res,200,{ token:issueToken(user.id), user:safeUser(user) });
+  if(req.method==='POST'&&pathname==='/api/subjects'){
+    const b=await readJson(req),cls=c.userClass(user.id);if(!cls)return{status:404,body:{error:'Class not found'}};const current=c.classSubjects(cls.id);if(current.length>=10)return{status:400,body:{error:'Maximum 10 subjects allowed for one class'}};const name=String(b.name||'').trim().replace(/\s+/g,' ');if(!name)return{status:400,body:{error:'Enter the subject name'}};if(current.some(s=>s.name.toLowerCase()===name.toLowerCase()))return{status:409,body:{error:'That subject is already in this class'}};const subject={id:id('sub'),classId:cls.id,name,active:true,createdAt:nowIso()};db.subjects.push(subject);return{status:201,body:{subject,state:stateForUser(db,user,workspaceKey)}};
   }
-
-  const user = standaloneUser();
-
-  if (req.method === 'GET' && pathname === '/api/me') return sendJson(res,200,stateForUser(user));
-  if (req.method === 'GET' && pathname === '/api/class-data') return sendJson(res,200,stateForUser(user));
-
-  if (req.method === 'POST' && pathname === '/api/ai-comment') {
-    const b=await readJson(req), cls=userClass(user.id);
-    if(!cls) return sendError(res,404,'Class not found');
-    const pupil=db.pupils.find(p=>p.id===String(b.pupilId||'')&&p.classId===cls.id&&p.active!==false);
-    if(!pupil) return sendError(res,404,'Pupil not found');
-    const snapshot=pupilReportSnapshot(user,pupil);
-    const fallback=smartLocalComment(snapshot);
-    if(!OPENAI_API_KEY) return sendJson(res,200,{comment:fallback,source:'smart-local',message:'Online AI is not configured on the server. Smart Local comment generated.'});
-    try{
-      const comment=await generateOnlineComment(snapshot);
-      return sendJson(res,200,{comment:comment||fallback,source:comment?'online-ai':'smart-local',message:comment?`AI comment generated with ${OPENAI_MODEL}.`:'AI returned no text. Smart Local comment generated.'});
-    }catch(err){
-      console.error('AI comment failed:',err.message);
-      return sendJson(res,200,{comment:fallback,source:'smart-local',message:`Online AI was unavailable. Smart Local comment generated instead.`});
-    }
-  }
-
-  if (req.method === 'PUT' && pathname === '/api/setup') {
-    const b = await readJson(req);
-    const cls = userClass(user.id);
-    if (!cls) return sendError(res,404,'Class not found');
-    const teacherName=String(b.teacherName||'').trim(); const teacherPhone=String(b.teacherPhone||'').trim();
-    const schoolName=String(b.schoolName||'').trim(); const className=String(b.className||'').trim();
-    const assessmentName=normalizeAssessmentName(b.assessmentName);
-    const gradingSystem=normalizeGradingSystem(b.gradingSystem); const schoolType=normalizeSchoolType(b.schoolType);
-    const term=normalizeTerm(b.term); const academicYear=normalizeAcademicYear(b.academicYear);
-    if(!teacherName||!teacherPhone||!schoolName||!className||!schoolType) return sendError(res,400,'Class teacher name, phone number, school, class and school type are required');
-    user.name=teacherName; user.phone=teacherPhone; cls.teacherName=teacherName; cls.teacherPhone=teacherPhone;
-    cls.schoolName=schoolName; cls.schoolType=schoolType; cls.name=className; cls.gradingSystem=gradingSystem; cls.term=term; cls.academicYear=academicYear;
-    ensureAssessment(cls,assessmentName);
-
-    // Backward-compatible support for older V3 clients that still submit a subject array.
-    if(Array.isArray(b.subjects)){
-      const subjectNames=[...new Set(b.subjects.map(x=>String(x||'').trim()).filter(Boolean))].slice(0,10);
-      const oldSubjects=classSubjects(cls.id); const subjectByName=new Map(oldSubjects.map(s=>[s.name.toLowerCase(),s]));
-      for(const s of oldSubjects) s.active=false;
-      for(const name of subjectNames){ let s=subjectByName.get(name.toLowerCase()); if(!s){s={id:id('sub'),classId:cls.id,name,active:true,createdAt:nowIso()};db.subjects.push(s);} s.name=name;s.active=true; }
-    }
-
-    // Backward-compatible support for older V3 bulk-pupil setup payloads.
-    if(Array.isArray(b.pupils)){
-      const pupilRows=b.pupils.map(x=>{
-        let firstName=String(x.firstName||'').trim(), surname=String(x.surname||'').trim();
-        const legacyName=String(x.name||'').trim();
-        if(!firstName&&!surname&&legacyName){const parts=legacyName.split(/\s+/).filter(Boolean);firstName=parts.shift()||'';surname=parts.join(' ');}
-        const name=[firstName,surname].filter(Boolean).join(' ').trim()||legacyName;
-        return {firstName,surname,name,sex:String(x.sex||'').trim().toUpperCase().slice(0,1),examNo:String(x.examNo||'').trim(),parentPhone:String(x.parentPhone||'').trim()};
-      }).filter(x=>x.name).slice(0,120);
-      const oldPupils=classPupils(cls.id); const pupilByKey=new Map(oldPupils.map(p=>[(p.examNo||p.name).toLowerCase(),p]));
-      for(const p of oldPupils) p.active=false;
-      for(const row of pupilRows){ const key=(row.examNo||row.name).toLowerCase(); let p=pupilByKey.get(key); if(!p){p={id:id('p'),classId:cls.id,active:true};db.pupils.push(p);} Object.assign(p,row,{active:true}); }
-    }
-    saveDb(); return sendJson(res,200,stateForUser(user));
-  }
-
-  if (req.method === 'PUT' && pathname === '/api/assessment') {
-    const b=await readJson(req), cls=userClass(user.id);
-    if(!cls) return sendError(res,404,'Class not found');
-    const assessmentName=normalizeAssessmentName(b.assessmentName), term=normalizeTerm(b.term||cls.term), academicYear=normalizeAcademicYear(b.academicYear||cls.academicYear);
-    cls.term=term; cls.academicYear=academicYear; ensureAssessment(cls,assessmentName,term,academicYear); saveDb();
-    return sendJson(res,200,stateForUser(user));
-  }
-
-  if (req.method === 'POST' && pathname === '/api/subjects') {
-    const b=await readJson(req), cls=userClass(user.id);
-    if(!cls) return sendError(res,404,'Class not found');
-    const current=classSubjects(cls.id);
-    if(current.length>=10) return sendError(res,400,'Maximum 10 subjects allowed for one class');
-    const name=String(b.name||'').trim().replace(/\s+/g,' ');
-    if(!name) return sendError(res,400,'Enter the subject name');
-    if(current.some(s=>s.name.toLowerCase()===name.toLowerCase())) return sendError(res,409,'That subject is already in this class');
-    const subject={id:id('sub'),classId:cls.id,name,active:true,createdAt:nowIso()};
-    db.subjects.push(subject);saveDb();return sendJson(res,201,{subject,state:stateForUser(user)});
-  }
-
   const subjectMatch=pathname.match(/^\/api\/subjects\/([^/]+)$/);
-  if(subjectMatch && req.method==='PUT'){
-    const cls=userClass(user.id);if(!cls)return sendError(res,404,'Class not found');
-    const subject=db.subjects.find(s=>s.id===decodeURIComponent(subjectMatch[1])&&s.classId===cls.id&&s.active!==false);
-    if(!subject)return sendError(res,404,'Subject not found');
-    const b=await readJson(req), name=String(b.name||'').trim().replace(/\s+/g,' ');
-    if(!name)return sendError(res,400,'Enter the subject name');
-    if(classSubjects(cls.id).some(s=>s.id!==subject.id&&s.name.toLowerCase()===name.toLowerCase()))return sendError(res,409,'That subject is already in this class');
-    subject.name=name;saveDb();return sendJson(res,200,{subject,state:stateForUser(user)});
+  if(subjectMatch&&req.method==='PUT'){const cls=c.userClass(user.id),subject=cls&&db.subjects.find(s=>s.id===decodeURIComponent(subjectMatch[1])&&s.classId===cls.id&&s.active!==false);if(!subject)return{status:404,body:{error:'Subject not found'}};const b=await readJson(req),name=String(b.name||'').trim().replace(/\s+/g,' ');if(!name)return{status:400,body:{error:'Enter the subject name'}};if(c.classSubjects(cls.id).some(s=>s.id!==subject.id&&s.name.toLowerCase()===name.toLowerCase()))return{status:409,body:{error:'That subject is already in this class'}};subject.name=name;return{status:200,body:{subject,state:stateForUser(db,user,workspaceKey)}};}
+  if(subjectMatch&&req.method==='DELETE'){const cls=c.userClass(user.id),subject=cls&&db.subjects.find(s=>s.id===decodeURIComponent(subjectMatch[1])&&s.classId===cls.id&&s.active!==false);if(!subject)return{status:404,body:{error:'Subject not found'}};subject.active=false;subject.removedAt=nowIso();return{status:200,body:{removed:true,state:stateForUser(db,user,workspaceKey)}};}
+  if(req.method==='POST'&&pathname==='/api/pupils'){
+    const b=await readJson(req),cls=c.userClass(user.id);if(!cls)return{status:404,body:{error:'Class not found'}};if(c.classPupils(cls.id).length>=120)return{status:400,body:{error:'This class already has the maximum of 120 pupils'}};const firstName=String(b.firstName||'').trim(),surname=String(b.surname||'').trim(),sex=String(b.sex||'').trim().toUpperCase().slice(0,1);if(!firstName||!surname)return{status:400,body:{error:'Enter both first name and surname'}};if(!['F','M'].includes(sex))return{status:400,body:{error:'Select the pupil sex: Male or Female'}};const pupil={id:id('p'),classId:cls.id,firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex,examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim(),classTeacherComment:'',comments:{},active:true,createdAt:nowIso()};db.pupils.push(pupil);return{status:201,body:{pupil,state:stateForUser(db,user,workspaceKey)}};
   }
-  if(subjectMatch && req.method==='DELETE'){
-    const cls=userClass(user.id);if(!cls)return sendError(res,404,'Class not found');
-    const subject=db.subjects.find(s=>s.id===decodeURIComponent(subjectMatch[1])&&s.classId===cls.id&&s.active!==false);
-    if(!subject)return sendError(res,404,'Subject not found');
-    subject.active=false;subject.removedAt=nowIso();saveDb();return sendJson(res,200,{removed:true,state:stateForUser(user)});
-  }
-
-  if (req.method === 'POST' && pathname === '/api/pupils') {
-    const b=await readJson(req); const cls=userClass(user.id);
-    if(!cls) return sendError(res,404,'Class not found');
-    if(classPupils(cls.id).length>=120) return sendError(res,400,'This class already has the maximum of 120 pupils');
-    const firstName=String(b.firstName||'').trim(); const surname=String(b.surname||'').trim(); const sex=String(b.sex||'').trim().toUpperCase().slice(0,1);
-    if(!firstName||!surname) return sendError(res,400,'Enter both first name and surname');
-    if(!['F','M'].includes(sex)) return sendError(res,400,'Select the pupil sex: Male or Female');
-    const pupil={id:id('p'),classId:cls.id,firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex,examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim(),classTeacherComment:'',comments:{},active:true,createdAt:nowIso()};
-    db.pupils.push(pupil); saveDb(); return sendJson(res,201,{pupil,state:stateForUser(user)});
-  }
-
   const pupilCommentMatch=pathname.match(/^\/api\/pupils\/([^/]+)\/comment$/);
-  if(pupilCommentMatch && req.method==='PUT'){
-    const cls=userClass(user.id);if(!cls)return sendError(res,404,'Class not found');
-    const pupil=db.pupils.find(p=>p.id===decodeURIComponent(pupilCommentMatch[1])&&p.classId===cls.id&&p.active!==false);
-    if(!pupil)return sendError(res,404,'Pupil not found');
-    const assessment=userAssessment(user.id);if(!assessment)return sendError(res,404,'Assessment not found');
-    const b=await readJson(req);const comment=String(b.comment||'').trim().slice(0,4000);pupil.comments=(pupil.comments&&typeof pupil.comments==='object')?pupil.comments:{};pupil.comments[assessment.id]=comment;pupil.classTeacherComment='';saveDb();return sendJson(res,200,{saved:true,comment,state:stateForUser(user)});
-  }
-
+  if(pupilCommentMatch&&req.method==='PUT'){const cls=c.userClass(user.id),pupil=cls&&db.pupils.find(p=>p.id===decodeURIComponent(pupilCommentMatch[1])&&p.classId===cls.id&&p.active!==false),assessment=c.userAssessment(user.id);if(!pupil)return{status:404,body:{error:'Pupil not found'}};if(!assessment)return{status:404,body:{error:'Assessment not found'}};const b=await readJson(req),comment=String(b.comment||'').trim().slice(0,4000);pupil.comments=pupil.comments&&typeof pupil.comments==='object'?pupil.comments:{};pupil.comments[assessment.id]=comment;pupil.classTeacherComment='';return{status:200,body:{saved:true,comment,state:stateForUser(db,user,workspaceKey)}};}
   const pupilMatch=pathname.match(/^\/api\/pupils\/([^/]+)$/);
-  if (pupilMatch && req.method === 'PUT') {
-    const cls=userClass(user.id); if(!cls) return sendError(res,404,'Class not found');
-    const pupil=db.pupils.find(p=>p.id===decodeURIComponent(pupilMatch[1])&&p.classId===cls.id&&p.active!==false);
-    if(!pupil) return sendError(res,404,'Pupil not found');
-    const b=await readJson(req); const firstName=String(b.firstName||'').trim(); const surname=String(b.surname||'').trim(); const sex=String(b.sex||'').trim().toUpperCase().slice(0,1);
-    if(!firstName||!surname) return sendError(res,400,'Enter both first name and surname');
-    if(!['F','M'].includes(sex)) return sendError(res,400,'Select the pupil sex: Male or Female');
-    Object.assign(pupil,{firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex,examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim()});
-    saveDb(); return sendJson(res,200,{pupil,state:stateForUser(user)});
-  }
+  if(pupilMatch&&req.method==='PUT'){const cls=c.userClass(user.id),pupil=cls&&db.pupils.find(p=>p.id===decodeURIComponent(pupilMatch[1])&&p.classId===cls.id&&p.active!==false);if(!pupil)return{status:404,body:{error:'Pupil not found'}};const b=await readJson(req),firstName=String(b.firstName||'').trim(),surname=String(b.surname||'').trim(),sex=String(b.sex||'').trim().toUpperCase().slice(0,1);if(!firstName||!surname)return{status:400,body:{error:'Enter both first name and surname'}};if(!['F','M'].includes(sex))return{status:400,body:{error:'Select the pupil sex: Male or Female'}};Object.assign(pupil,{firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex,examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim()});return{status:200,body:{pupil,state:stateForUser(db,user,workspaceKey)}};}
+  if(pupilMatch&&req.method==='DELETE'){const cls=c.userClass(user.id),pupil=cls&&db.pupils.find(p=>p.id===decodeURIComponent(pupilMatch[1])&&p.classId===cls.id&&p.active!==false);if(!pupil)return{status:404,body:{error:'Pupil not found'}};pupil.active=false;pupil.removedAt=nowIso();return{status:200,body:{removed:true,state:stateForUser(db,user,workspaceKey)}};}
+  if(req.method==='PUT'&&pathname==='/api/results'){const b=await readJson(req),cls=c.userClass(user.id),assessment=c.userAssessment(user.id);if(!cls||!assessment)return{status:404,body:{error:'Class not found'}};const allowedPupils=new Set(c.classPupils(cls.id).map(p=>p.id)),allowedSubjects=new Set(c.classSubjects(cls.id).map(s=>s.id)),rows=Array.isArray(b.rows)?b.rows:[];for(const r of rows){if(!allowedPupils.has(r.pupilId)||!allowedSubjects.has(r.subjectId))continue;db.marks[c.markKey(assessment.id,r.pupilId,r.subjectId)]=cleanMark(r.mark);}return{status:200,body:{saved:true,at:nowIso()}};}
+  return{status:404,body:{error:'API endpoint not found'}};
+}
 
-  if (pupilMatch && req.method === 'DELETE') {
-    const cls=userClass(user.id); if(!cls) return sendError(res,404,'Class not found');
-    const pupil=db.pupils.find(p=>p.id===decodeURIComponent(pupilMatch[1])&&p.classId===cls.id&&p.active!==false);
-    if(!pupil) return sendError(res,404,'Pupil not found');
-    pupil.active=false; pupil.removedAt=nowIso(); saveDb(); return sendJson(res,200,{removed:true,state:stateForUser(user)});
+async function api(req,res,urlObj){
+  const pathname=urlObj.pathname;
+  if(req.method==='GET'&&pathname==='/api/version')return sendJson(res,200,{version:APP_VERSION,storage:storageMode});
+  if(req.method==='GET'&&pathname==='/api/health')return sendJson(res,200,{ok:true,version:APP_VERSION,storage:storageMode});
+  const workspaceKey=workspaceKeyFor(req,res);
+  if(req.method==='POST'&&pathname==='/api/ai-comment'){
+    const b=await readJson(req);
+    const snap=await readWorkspace(workspaceKey,db=>{const c=ctx(db),user=c.standaloneUser(),cls=c.userClass(user.id),pupil=cls&&db.pupils.find(p=>p.id===String(b.pupilId||'')&&p.classId===cls.id&&p.active!==false);if(!pupil)throw Object.assign(new Error('Pupil not found'),{status:404});return pupilReportSnapshot(db,user,pupil);});
+    const fallback=smartLocalComment(snap);if(!OPENAI_API_KEY)return sendJson(res,200,{comment:fallback,source:'smart-local',message:'Online AI is not configured on the server. Smart Local comment generated.'});
+    try{const comment=await generateOnlineComment(snap);return sendJson(res,200,{comment:comment||fallback,source:comment?'online-ai':'smart-local',message:comment?`AI comment generated with ${OPENAI_MODEL}.`:'AI returned no text. Smart Local comment generated.'});}catch(err){console.error('AI comment failed:',err.message);return sendJson(res,200,{comment:fallback,source:'smart-local',message:'Online AI was unavailable. Smart Local comment generated instead.'});}
   }
-
-  if (req.method === 'PUT' && pathname === '/api/results') {
-    const b=await readJson(req); const cls=userClass(user.id); const assessment=userAssessment(user.id);
-    if(!cls||!assessment) return sendError(res,404,'Class not found');
-    const allowedPupils=new Set(classPupils(cls.id).map(p=>p.id)); const allowedSubjects=new Set(classSubjects(cls.id).map(s=>s.id));
-    const rows=Array.isArray(b.rows)?b.rows:[];
-    for(const r of rows){ if(!allowedPupils.has(r.pupilId)||!allowedSubjects.has(r.subjectId)) continue; db.marks[markKey(assessment.id,r.pupilId,r.subjectId)]=cleanMark(r.mark); }
-    saveDb(); return sendJson(res,200,{saved:true,at:nowIso()});
-  }
-
-  return sendError(res,404,'API endpoint not found');
+  const result=await withWorkspace(workspaceKey,db=>workspaceApi(db,workspaceKey,req,urlObj));return sendJson(res,result.status,result.body);
 }
 
 const MIME={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.svg':'image/svg+xml'};
-function serveStatic(pathname,res){
-  let rel=decodeURIComponent(pathname||'/'); if(rel==='/'||rel==='') rel='/index.html';
-  const file=path.normalize(path.join(PUBLIC_DIR,rel)); if(!file.startsWith(PUBLIC_DIR)) return false;
-  let final=file; try{if(fs.statSync(final).isDirectory()) final=path.join(final,'index.html');}catch{return false;}
-  try{const data=fs.readFileSync(final);res.writeHead(200,{'Content-Type':MIME[path.extname(final).toLowerCase()]||'application/octet-stream','Cache-Control':path.basename(final)==='service-worker.js'?'no-cache':'public, max-age=60'});res.end(data);return true;}catch{return false;}
-}
+function serveStatic(pathname,res){let rel=decodeURIComponent(pathname||'/');if(rel==='/'||rel==='')rel='/index.html';const file=path.normalize(path.join(PUBLIC_DIR,rel));if(!file.startsWith(PUBLIC_DIR))return false;let final=file;try{if(fs.statSync(final).isDirectory())final=path.join(final,'index.html');}catch{return false;}try{const data=fs.readFileSync(final);res.writeHead(200,{'Content-Type':MIME[path.extname(final).toLowerCase()]||'application/octet-stream','Cache-Control':path.basename(final)==='service-worker.js'?'no-cache':'public, max-age=60'});res.end(data);return true;}catch{return false;}}
 
-const server=http.createServer(async(req,res)=>{const urlObj=new URL(req.url,`http://${req.headers.host||'localhost'}`);try{if(urlObj.pathname.startsWith('/api/')){await api(req,res,urlObj);return;}if(!serveStatic(urlObj.pathname,res))sendError(res,404,'Not found');}catch(err){console.error(err);if(!res.headersSent)sendError(res,500,err.message||'Server error');else res.end();}});
-server.listen(PORT,HOST,()=>{console.log(`Reportform ZM V${APP_VERSION} running on http://${HOST}:${PORT}`);console.log(`Simple data file: ${DATA_FILE}`);console.log(`Online AI comments: ${OPENAI_API_KEY?'configured':'not configured (Smart Local fallback active)'}`);console.log('Account sign-in: disabled (single class-teacher mode).');});
+const server=http.createServer(async(req,res)=>{const urlObj=new URL(req.url,`http://${req.headers.host||'localhost'}`);try{if(urlObj.pathname.startsWith('/api/')){await api(req,res,urlObj);return;}if(!serveStatic(urlObj.pathname,res))sendError(res,404,'Not found');}catch(err){console.error(err);if(!res.headersSent)sendError(res,err.status||500,err.message||'Server error');else res.end();}});
+
+initStorage().then(()=>server.listen(PORT,HOST,()=>{console.log(`Reportform ZM V${APP_VERSION} running on http://${HOST}:${PORT}`);console.log(`Storage: ${storageMode}${storageMode==='postgresql'?' (multi-teacher ready)':' (local fallback; set DATABASE_URL for many teachers)'}`);console.log(`Online AI comments: ${OPENAI_API_KEY?'configured':'not configured (Smart Local fallback active)'}`);console.log('Account sign-in: disabled; each browser receives a separate private class workspace.');})).catch(err=>{console.error('Could not initialise storage:',err);process.exit(1);});

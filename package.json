@@ -1,12 +1,15 @@
 {
-  "name": "reportform-zm-simple-class-teacher",
-  "version": "3.0.7",
+  "name": "reportform-zm",
+  "version": "3.1.2",
   "private": true,
-  "description": "Reportform ZM V3.0.7 - simple guided class-teacher workflow with Day/Boarding context-aware AI comments, Week 4/Week 8/End of Term assessments, subject-by-subject results, CBC/OBC reports and WhatsApp-ready PDFs.",
+  "description": "Simple multi-teacher class report app for CBC and OBC assessments",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "pg": "^8.12.0"
   }
 }
