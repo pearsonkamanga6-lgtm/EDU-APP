@@ -1,4 +1,4 @@
-const CACHE = 'reportform-zm-v3-1-3';
+const CACHE = 'reportform-zm-v3-1-4';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
