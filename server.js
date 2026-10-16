@@ -6,15 +6,13 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.1.4';
+const APP_VERSION = '3.1.5';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
 const WORKSPACE_DIR = path.join(DATA_DIR, 'workspaces');
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
-const DATABASE_URL = String(process.env.DATABASE_URL || '').trim();
-let Pool = null; if (DATABASE_URL) ({ Pool } = require('pg'));
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-4o-mini').trim();
 const OPENAI_API_URL = String(process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions').trim();
@@ -116,42 +114,16 @@ function workspaceKeyFor(req,res){
   return key;
 }
 
-let pool = null;
-let storageMode = 'local';
+let storageMode = 'local-workspace';
 const localQueues = new Map();
 
-async function initStorage(){
-  if(!DATABASE_URL){storageMode='local';return;}
-  pool=new Pool({connectionString:DATABASE_URL,max:Number(process.env.PG_POOL_MAX||10),idleTimeoutMillis:30000,connectionTimeoutMillis:10000});
-  await pool.query(`CREATE TABLE IF NOT EXISTS reportform_workspaces (
-    workspace_key TEXT PRIMARY KEY,
-    data JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  )`);
-  await pool.query('SELECT 1');
-  storageMode='postgresql';
-}
+async function initStorage(){ storageMode='local-workspace'; }
 
 function localFileFor(key){return path.join(WORKSPACE_DIR,crypto.createHash('sha256').update(key).digest('hex')+'.json');}
 function readLocal(key){try{return migrateDb(JSON.parse(fs.readFileSync(localFileFor(key),'utf8')));}catch{return emptyDb();}}
 function writeLocal(key,db){db.updatedAt=nowIso();const file=localFileFor(key),tmp=file+'.tmp';fs.writeFileSync(tmp,JSON.stringify(db,null,2));fs.renameSync(tmp,file);}
 
 async function withWorkspace(key,fn){
-  if(storageMode==='postgresql'){
-    const client=await pool.connect();
-    try{
-      await client.query('BEGIN');
-      await client.query('INSERT INTO reportform_workspaces(workspace_key,data) VALUES($1,$2::jsonb) ON CONFLICT (workspace_key) DO NOTHING',[key,JSON.stringify(emptyDb())]);
-      const r=await client.query('SELECT data FROM reportform_workspaces WHERE workspace_key=$1 FOR UPDATE',[key]);
-      const db=migrateDb(r.rows[0]?.data||emptyDb());
-      const result=await fn(db);
-      db.updatedAt=nowIso();
-      await client.query('UPDATE reportform_workspaces SET data=$2::jsonb, updated_at=NOW() WHERE workspace_key=$1',[key,JSON.stringify(db)]);
-      await client.query('COMMIT');
-      return result;
-    }catch(err){try{await client.query('ROLLBACK');}catch{} throw err;}finally{client.release();}
-  }
   const prev=localQueues.get(key)||Promise.resolve();
   const run=prev.catch(()=>{}).then(async()=>{const db=readLocal(key);const result=await fn(db);writeLocal(key,db);return result;});
   const tracked=run.finally(()=>{if(localQueues.get(key)===tracked)localQueues.delete(key);});
@@ -159,13 +131,7 @@ async function withWorkspace(key,fn){
   return run;
 }
 
-async function readWorkspace(key,fn){
-  if(storageMode==='postgresql'){
-    const r=await pool.query('SELECT data FROM reportform_workspaces WHERE workspace_key=$1',[key]);
-    const db=migrateDb(r.rows[0]?.data||emptyDb()); return fn(db);
-  }
-  return fn(readLocal(key));
-}
+async function readWorkspace(key,fn){ return fn(readLocal(key)); }
 
 function safeUser(u){if(!u)return null;const {pinHash,...rest}=u;return rest;}
 function sendJson(res,status,obj){const body=JSON.stringify(obj);res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(body);}
@@ -251,11 +217,13 @@ function aiSystemPrompt(snapshot){
 }
 async function generateOnlineComment(snapshot){if(!OPENAI_API_KEY)return null;const res=await fetch(OPENAI_API_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}`},body:JSON.stringify({model:OPENAI_MODEL,messages:[{role:'system',content:aiSystemPrompt(snapshot)},{role:'user',content:`Generate one class teacher comment for this report form.\n\nPupil data:\n${JSON.stringify(snapshot,null,2)}`}],temperature:.7,max_tokens:260})});const raw=await res.text();let data;try{data=JSON.parse(raw);}catch{data={raw};}if(!res.ok)throw new Error(data?.error?.message||raw.slice(0,240)||`AI request failed (${res.status})`);const content=data?.choices?.[0]?.message?.content;if(typeof content==='string'&&content.trim())return content.replace(/^['"\s]+|['"\s]+$/g,'').trim();if(typeof data?.output_text==='string'&&data.output_text.trim())return data.output_text.trim();return null;}
 
-function stateForUser(db,user,workspaceKey){const c=ctx(db),cls=c.userClass(user.id),assessment=c.userAssessment(user.id),subjects=cls?c.classSubjects(cls.id):[],sourcePupils=cls?c.classPupils(cls.id):[],pupils=sourcePupils.map(p=>({...p,classTeacherComment:assessment?String(p.comments?.[assessment.id]||''):''})),marks={};if(assessment){for(const p of sourcePupils){marks[p.id]={};for(const s of subjects)marks[p.id][s.id]=db.marks[c.markKey(assessment.id,p.id,s.id)]??null;}}return{version:APP_VERSION,user:safeUser(user),class:cls,assessment,assessmentOptions:cls?assessmentNamesForClass(cls.name,cls.gradeLevel):BASE_ASSESSMENT_NAMES,subjects,pupils,marks,ai:{onlineConfigured:!!OPENAI_API_KEY},storage:{mode:storageMode,multiTeacherReady:storageMode==='postgresql',workspace:String(workspaceKey).slice(-8)}};}
+function stateForUser(db,user,workspaceKey){const c=ctx(db),cls=c.userClass(user.id),assessment=c.userAssessment(user.id),subjects=cls?c.classSubjects(cls.id):[],sourcePupils=cls?c.classPupils(cls.id):[],pupils=sourcePupils.map(p=>({...p,classTeacherComment:assessment?String(p.comments?.[assessment.id]||''):''})),marks={};if(assessment){for(const p of sourcePupils){marks[p.id]={};for(const s of subjects)marks[p.id][s.id]=db.marks[c.markKey(assessment.id,p.id,s.id)]??null;}}return{version:APP_VERSION,user:safeUser(user),class:cls,assessment,assessmentOptions:cls?assessmentNamesForClass(cls.name,cls.gradeLevel):BASE_ASSESSMENT_NAMES,subjects,pupils,marks,ai:{onlineConfigured:!!OPENAI_API_KEY},storage:{mode:storageMode,multiTeacherReady:true,durableCloud:false,workspace:String(workspaceKey).slice(-8)}};}
 
 async function workspaceApi(db,workspaceKey,req,urlObj){
   const c=ctx(db),pathname=urlObj.pathname,user=c.standaloneUser();
   if(req.method==='GET'&&(pathname==='/api/me'||pathname==='/api/class-data'))return{status:200,body:stateForUser(db,user,workspaceKey)};
+  if(req.method==='GET'&&pathname==='/api/backup')return{status:200,body:{appVersion:APP_VERSION,exportedAt:nowIso(),data:db}};
+  if(req.method==='POST'&&pathname==='/api/restore'){const b=await readJson(req),restored=migrateDb(b?.data||b);for(const k of Object.keys(db))delete db[k];Object.assign(db,restored);const restoredUser=ctx(db).standaloneUser();return{status:200,body:{restored:true,state:stateForUser(db,restoredUser,workspaceKey)}};}
   if(req.method==='PUT'&&pathname==='/api/setup'){
     const b=await readJson(req),cls=c.userClass(user.id);if(!cls)return{status:404,body:{error:'Class not found'}};
     const teacherName=String(b.teacherName||'').trim(),teacherPhone=String(b.teacherPhone||'').trim(),schoolName=String(b.schoolName||'').trim();
@@ -306,4 +274,4 @@ function serveStatic(pathname,res){let rel=decodeURIComponent(pathname||'/');if(
 
 const server=http.createServer(async(req,res)=>{const urlObj=new URL(req.url,`http://${req.headers.host||'localhost'}`);try{if(urlObj.pathname.startsWith('/api/')){await api(req,res,urlObj);return;}if(!serveStatic(urlObj.pathname,res))sendError(res,404,'Not found');}catch(err){console.error(err);if(!res.headersSent)sendError(res,err.status||500,err.message||'Server error');else res.end();}});
 
-initStorage().then(()=>server.listen(PORT,HOST,()=>{console.log(`Reportform ZM V${APP_VERSION} running on http://${HOST}:${PORT}`);console.log(`Storage: ${storageMode}${storageMode==='postgresql'?' (multi-teacher ready)':' (local fallback; set DATABASE_URL for many teachers)'}`);console.log(`Online AI comments: ${OPENAI_API_KEY?'configured':'not configured (Smart Local fallback active)'}`);console.log('Account sign-in: disabled; each browser receives a separate private class workspace.');})).catch(err=>{console.error('Could not initialise storage:',err);process.exit(1);});
+initStorage().then(()=>server.listen(PORT,HOST,()=>{console.log(`Reportform ZM V${APP_VERSION} running on http://${HOST}:${PORT}`);console.log(`Storage: ${storageMode} (separate browser workspaces; no DATABASE_URL required)`);console.log(`Online AI comments: ${OPENAI_API_KEY?'configured':'not configured (Smart Local fallback active)'}`);console.log('Account sign-in: disabled; each browser receives a separate private class workspace.');})).catch(err=>{console.error('Could not initialise storage:',err);process.exit(1);});
