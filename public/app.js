@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION='3.1.4';
+  const APP_VERSION='3.1.5';
   const app=document.getElementById('app');
   const state={me:null,page:'home',saveTimer:null};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
@@ -103,12 +103,29 @@
     try{state.me=await api('/api/assessment',{method:'PUT',body:{assessmentName:name}});renderShell();toast(`${name} is ready`);navigate('home');}catch(err){toast(err.message,true);}
   }
 
+  async function downloadWorkspaceBackup(){
+    try{
+      const data=await api('/api/backup');
+      const safeClass=String(state.me?.class?.name||'class').replace(/[^A-Za-z0-9_-]+/g,'_');
+      const stamp=new Date().toISOString().slice(0,10);
+      const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+      const url=URL.createObjectURL(blob),a=document.createElement('a');
+      a.href=url;a.download=`Reportform_ZM_Backup_${safeClass}_${stamp}.json`;a.click();
+      setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Backup downloaded');
+    }catch(err){toast(err.message,true);}
+  }
+  function restoreWorkspaceBackup(){
+    const input=document.createElement('input');input.type='file';input.accept='application/json,.json';
+    input.onchange=()=>{const file=input.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=async()=>{try{const parsed=JSON.parse(String(reader.result||''));if(!confirm('Restore this backup? It will replace the current class workspace on this browser.'))return;const r=await api('/api/restore',{method:'POST',body:parsed});state.me=r.state;renderShell();toast('Backup restored');navigate('home');}catch(err){toast('Could not restore this backup: '+err.message,true);}};reader.readAsText(file);};
+    input.click();
+  }
+
   function renderHome(c){
     const d=state.me,{total,completedCells}=stats(),pct=total?Math.round(completedCells/total*100):0,ps=progressSummary(d),nextAssessment=nextAssessmentName(assessmentLabel(d));
     const schoolType=d.class?.schoolType==='BOARDING'?'Boarding School':'Day School';
     const continueHtml=ps.next?`<button id="continuePupil" class="btn primary big full continue-work">Continue ${esc(ps.next.p.name)} — ${ps.next.m.summary.completedCount}/${ps.next.m.summary.total} subjects →</button>`:(d.pupils?.length?'<div class="all-complete-banner">✓ All pupils have been checked for this assessment.</div>':'');
     const calendar=schoolCalendarLabel(d);
-    const storageBanner=d.storage?.multiTeacherReady?`<div class="cloud-status ok">✓ Cloud database connected — this teacher/class workspace is separate from other teachers.</div>`:`<div class="cloud-status warn">⚠ Multi-teacher database is not connected yet. Add DATABASE_URL on Render before many teachers use the app.</div>`;
+    const storageBanner=`<div class="cloud-status ok">✓ Private teacher workspace active — no database setup required. Each browser has its own class workspace. Download a backup before major updates or changing device.</div>`;
     c.innerHTML=`<section class="hero"><span class="eyebrow">CLASS TEACHER MODE</span><h1>${esc(d.class?.name||'My Class')}</h1><p>${esc(assessmentLabel(d))} • ${esc(d.class?.term||'Term 1')} ${esc(d.class?.academicYear||new Date().getFullYear())} • ${esc(schoolType)} • ${esc(d.class?.gradingSystem==='CBC'?'CBC':'OBC')} grading</p>${calendar?`<div class="hero-calendar">${esc(calendar)}</div>`:''}<div class="progress"><span style="width:${pct}%"></span></div><small>${completedCells}/${total} subject entries checked for this assessment</small></section>
       ${storageBanner}
       <div class="dashboard-stats"><div><b>${d.pupils?.length||0}</b><span>Pupils</span></div><div><b>${ps.complete}</b><span>Complete</span></div><div><b>${ps.inProgress}</b><span>In progress</span></div><div><b>${ps.notStarted}</b><span>Not started</span></div></div>
@@ -121,10 +138,13 @@
         <button class="action-card pupil-action" data-go="pupils"><b>3. 👥 Pupils & Results</b><span>Add each pupil, then enter that pupil's marks subject by subject.</span></button>
         <button class="action-card" data-go="reports"><b>4. ▤ Reports</b><span>Class position, TOTAL SAT, AI comment, PDF and WhatsApp.</span></button>
         <button class="action-card" data-go="results"><b>✎ Results Grid</b><span>Use this when you need to review or correct several marks.</span></button>
-      </div>`;
+      </div>
+      <section class="backup-card"><div><b>Protect this class data</b><span>Keep a copy before app updates or when moving to another device.</span></div><div class="backup-actions"><button id="downloadBackup" class="btn ghost">Download Backup</button><button id="restoreBackup" class="btn ghost">Restore Backup</button></div></section>`;
     c.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>navigate(b.dataset.go));
     if(byId('startNextAssessment'))byId('startNextAssessment').onclick=()=>startAssessment(nextAssessment);
     if(byId('continuePupil'))byId('continuePupil').onclick=()=>openGuidedResults(ps.next.p.id,firstMissingSubjectIndex(ps.next.p.id));
+    if(byId('downloadBackup'))byId('downloadBackup').onclick=downloadWorkspaceBackup;
+    if(byId('restoreBackup'))byId('restoreBackup').onclick=restoreWorkspaceBackup;
   }
 
   function splitStoredName(p){

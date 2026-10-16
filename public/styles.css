@@ -53,3 +53,5 @@
 
 /* V3.1.4: make the school opening/closing date a permanent report-detail row */
 .old-meta-box>.school-calendar-meta{grid-column:1/-1;display:grid;grid-template-columns:max-content 1fr;gap:8px;align-items:center;margin:1px -10px -9px;padding:8px 10px;border-top:1px solid #8fb0d8;background:#eff6ff;color:#153d7a;font-size:12px}.old-meta-box>.school-calendar-meta b{font-size:11px;letter-spacing:.02em}.old-meta-box>.school-calendar-meta span{font-weight:800;color:#111}
+
+.backup-card{margin-top:14px;background:#fff;border:1px solid #dbe4ef;border-radius:18px;padding:16px;display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap}.backup-card div:first-child{display:flex;flex-direction:column;gap:4px}.backup-card b{color:#0f376f}.backup-card span{color:#64748b;font-size:.92rem}.backup-actions{display:flex;gap:8px;flex-wrap:wrap}
