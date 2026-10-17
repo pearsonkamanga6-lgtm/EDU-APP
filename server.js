@@ -6,11 +6,12 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.1.5';
+const APP_VERSION = '3.1.6';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
 const WORKSPACE_DIR = path.join(DATA_DIR, 'workspaces');
+const RECOVERY_DIR = path.join(DATA_DIR, 'recovery');
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
@@ -23,6 +24,7 @@ const COOKIE_NAME = 'reportform_workspace';
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 2;
 
 fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+fs.mkdirSync(RECOVERY_DIR, { recursive: true });
 
 const nowIso = () => new Date().toISOString();
 const id = prefix => `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(5).toString('hex')}`;
@@ -123,6 +125,18 @@ function localFileFor(key){return path.join(WORKSPACE_DIR,crypto.createHash('sha
 function readLocal(key){try{return migrateDb(JSON.parse(fs.readFileSync(localFileFor(key),'utf8')));}catch{return emptyDb();}}
 function writeLocal(key,db){db.updatedAt=nowIso();const file=localFileFor(key),tmp=file+'.tmp';fs.writeFileSync(tmp,JSON.stringify(db,null,2));fs.renameSync(tmp,file);}
 
+function recoveryKeyHash(key){return crypto.createHash('sha256').update(key).digest('hex');}
+function recoveryWorkspaceDir(key){const dir=path.join(RECOVERY_DIR,recoveryKeyHash(key));fs.mkdirSync(dir,{recursive:true});return dir;}
+function dbHasMeaningfulData(db){return !!((db?.subjects?.length||0)||(db?.pupils?.length||0)||(db?.classes||[]).some(c=>String(c?.teacherName||c?.schoolName||c?.name||'').trim())||Object.keys(db?.marks||{}).length);}
+function listRecoverySnapshots(key){
+  const dir=recoveryWorkspaceDir(key);
+  try{return fs.readdirSync(dir).filter(n=>n.endsWith('.json')).map(name=>{const file=path.join(dir,name);const st=fs.statSync(file);let meta={};try{const raw=JSON.parse(fs.readFileSync(file,'utf8'));meta=raw?._recovery||{};}catch{}return{id:name,at:meta.at||st.mtime.toISOString(),reason:meta.reason||'Automatic recovery',size:st.size};}).sort((a,b)=>String(b.at).localeCompare(String(a.at)));}catch{return [];}
+}
+function writeRecoverySnapshot(key,db,reason='Automatic recovery',force=false){
+  try{if(!dbHasMeaningfulData(db))return null;const dir=recoveryWorkspaceDir(key),existing=listRecoverySnapshots(key),now=Date.now();if(!force&&existing[0]&&now-new Date(existing[0].at).getTime()<10*60*1000)return existing[0];const at=nowIso(),safeAt=at.replace(/[:.]/g,'-'),name=`${safeAt}_${crypto.randomBytes(3).toString('hex')}.json`,payload={_recovery:{at,reason,appVersion:APP_VERSION},data:db};fs.writeFileSync(path.join(dir,name),JSON.stringify(payload));const all=listRecoverySnapshots(key);for(const item of all.slice(20)){try{fs.unlinkSync(path.join(dir,item.id));}catch{}}for(const item of all){if(now-new Date(item.at).getTime()>14*24*60*60*1000){try{fs.unlinkSync(path.join(dir,item.id));}catch{}}}return{id:name,at,reason};}catch(err){console.warn('Recovery snapshot failed:',err.message);return null;}
+}
+function readRecoverySnapshot(key,snapshotId){const id=path.basename(String(snapshotId||''));if(!id.endsWith('.json'))throw new Error('Invalid recovery snapshot');const file=path.join(recoveryWorkspaceDir(key),id);if(!fs.existsSync(file))throw Object.assign(new Error('Recovery snapshot not found'),{status:404});const raw=JSON.parse(fs.readFileSync(file,'utf8'));return migrateDb(raw?.data||raw);}
+
 async function withWorkspace(key,fn){
   const prev=localQueues.get(key)||Promise.resolve();
   const run=prev.catch(()=>{}).then(async()=>{const db=readLocal(key);const result=await fn(db);writeLocal(key,db);return result;});
@@ -217,7 +231,7 @@ function aiSystemPrompt(snapshot){
 }
 async function generateOnlineComment(snapshot){if(!OPENAI_API_KEY)return null;const res=await fetch(OPENAI_API_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${OPENAI_API_KEY}`},body:JSON.stringify({model:OPENAI_MODEL,messages:[{role:'system',content:aiSystemPrompt(snapshot)},{role:'user',content:`Generate one class teacher comment for this report form.\n\nPupil data:\n${JSON.stringify(snapshot,null,2)}`}],temperature:.7,max_tokens:260})});const raw=await res.text();let data;try{data=JSON.parse(raw);}catch{data={raw};}if(!res.ok)throw new Error(data?.error?.message||raw.slice(0,240)||`AI request failed (${res.status})`);const content=data?.choices?.[0]?.message?.content;if(typeof content==='string'&&content.trim())return content.replace(/^['"\s]+|['"\s]+$/g,'').trim();if(typeof data?.output_text==='string'&&data.output_text.trim())return data.output_text.trim();return null;}
 
-function stateForUser(db,user,workspaceKey){const c=ctx(db),cls=c.userClass(user.id),assessment=c.userAssessment(user.id),subjects=cls?c.classSubjects(cls.id):[],sourcePupils=cls?c.classPupils(cls.id):[],pupils=sourcePupils.map(p=>({...p,classTeacherComment:assessment?String(p.comments?.[assessment.id]||''):''})),marks={};if(assessment){for(const p of sourcePupils){marks[p.id]={};for(const s of subjects)marks[p.id][s.id]=db.marks[c.markKey(assessment.id,p.id,s.id)]??null;}}return{version:APP_VERSION,user:safeUser(user),class:cls,assessment,assessmentOptions:cls?assessmentNamesForClass(cls.name,cls.gradeLevel):BASE_ASSESSMENT_NAMES,subjects,pupils,marks,ai:{onlineConfigured:!!OPENAI_API_KEY},storage:{mode:storageMode,multiTeacherReady:true,durableCloud:false,workspace:String(workspaceKey).slice(-8)}};}
+function stateForUser(db,user,workspaceKey){const c=ctx(db),cls=c.userClass(user.id),assessment=c.userAssessment(user.id),subjects=cls?c.classSubjects(cls.id):[],sourcePupils=cls?c.classPupils(cls.id):[],pupils=sourcePupils.map(p=>({...p,classTeacherComment:assessment?String(p.comments?.[assessment.id]||''):''})),marks={},trash={subjects:[],pupils:[]};if(cls){trash.subjects=(db.subjects||[]).filter(s=>s.classId===cls.id&&s.active===false).map(s=>({id:s.id,name:s.name,removedAt:s.removedAt||''}));trash.pupils=(db.pupils||[]).filter(p=>p.classId===cls.id&&p.active===false).map(p=>({id:p.id,name:p.name,firstName:p.firstName,surname:p.surname,sex:p.sex,removedAt:p.removedAt||''}));}if(assessment){for(const p of sourcePupils){marks[p.id]={};for(const s of subjects)marks[p.id][s.id]=db.marks[c.markKey(assessment.id,p.id,s.id)]??null;}}return{version:APP_VERSION,user:safeUser(user),class:cls,assessment,assessmentOptions:cls?assessmentNamesForClass(cls.name,cls.gradeLevel):BASE_ASSESSMENT_NAMES,subjects,pupils,marks,trash,recovery:{serverSnapshots:listRecoverySnapshots(workspaceKey).slice(0,10)},ai:{onlineConfigured:!!OPENAI_API_KEY},storage:{mode:storageMode,multiTeacherReady:true,durableCloud:false,workspace:String(workspaceKey).slice(-8)}};}
 
 async function workspaceApi(db,workspaceKey,req,urlObj){
   const c=ctx(db),pathname=urlObj.pathname,user=c.standaloneUser();
@@ -251,6 +265,10 @@ async function workspaceApi(db,workspaceKey,req,urlObj){
   const pupilMatch=pathname.match(/^\/api\/pupils\/([^/]+)$/);
   if(pupilMatch&&req.method==='PUT'){const cls=c.userClass(user.id),pupil=cls&&db.pupils.find(p=>p.id===decodeURIComponent(pupilMatch[1])&&p.classId===cls.id&&p.active!==false);if(!pupil)return{status:404,body:{error:'Pupil not found'}};const b=await readJson(req),firstName=String(b.firstName||'').trim(),surname=String(b.surname||'').trim(),sex=String(b.sex||'').trim().toUpperCase().slice(0,1);if(!firstName||!surname)return{status:400,body:{error:'Enter both first name and surname'}};if(!['F','M'].includes(sex))return{status:400,body:{error:'Select the pupil sex: Male or Female'}};Object.assign(pupil,{firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex,examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim()});return{status:200,body:{pupil,state:stateForUser(db,user,workspaceKey)}};}
   if(pupilMatch&&req.method==='DELETE'){const cls=c.userClass(user.id),pupil=cls&&db.pupils.find(p=>p.id===decodeURIComponent(pupilMatch[1])&&p.classId===cls.id&&p.active!==false);if(!pupil)return{status:404,body:{error:'Pupil not found'}};pupil.active=false;pupil.removedAt=nowIso();return{status:200,body:{removed:true,state:stateForUser(db,user,workspaceKey)}};}
+  const restorePupilMatch=pathname.match(/^\/api\/trash\/pupils\/([^/]+)\/restore$/);
+  if(restorePupilMatch&&req.method==='POST'){const cls=c.userClass(user.id),pupil=cls&&db.pupils.find(p=>p.id===decodeURIComponent(restorePupilMatch[1])&&p.classId===cls.id&&p.active===false);if(!pupil)return{status:404,body:{error:'Deleted pupil not found'}};pupil.active=true;delete pupil.removedAt;return{status:200,body:{restored:true,state:stateForUser(db,user,workspaceKey)}};}
+  const restoreSubjectMatch=pathname.match(/^\/api\/trash\/subjects\/([^/]+)\/restore$/);
+  if(restoreSubjectMatch&&req.method==='POST'){const cls=c.userClass(user.id),subject=cls&&db.subjects.find(s=>s.id===decodeURIComponent(restoreSubjectMatch[1])&&s.classId===cls.id&&s.active===false);if(!subject)return{status:404,body:{error:'Deleted subject not found'}};subject.active=true;delete subject.removedAt;return{status:200,body:{restored:true,state:stateForUser(db,user,workspaceKey)}};}
   if(req.method==='PUT'&&pathname==='/api/results'){const b=await readJson(req),cls=c.userClass(user.id),assessment=c.userAssessment(user.id);if(!cls||!assessment)return{status:404,body:{error:'Class not found'}};const allowedPupils=new Set(c.classPupils(cls.id).map(p=>p.id)),allowedSubjects=new Set(c.classSubjects(cls.id).map(s=>s.id)),rows=Array.isArray(b.rows)?b.rows:[];for(const r of rows){if(!allowedPupils.has(r.pupilId)||!allowedSubjects.has(r.subjectId))continue;db.marks[c.markKey(assessment.id,r.pupilId,r.subjectId)]=cleanMark(r.mark);}return{status:200,body:{saved:true,at:nowIso()}};}
   return{status:404,body:{error:'API endpoint not found'}};
 }
@@ -266,6 +284,8 @@ async function api(req,res,urlObj){
     const fallback=smartLocalComment(snap);if(!OPENAI_API_KEY)return sendJson(res,200,{comment:fallback,source:'smart-local',message:'Online AI is not configured on the server. Smart Local comment generated.'});
     try{const comment=await generateOnlineComment(snap);return sendJson(res,200,{comment:comment||fallback,source:comment?'online-ai':'smart-local',message:comment?`AI comment generated with ${OPENAI_MODEL}.`:'AI returned no text. Smart Local comment generated.'});}catch(err){console.error('AI comment failed:',err.message);return sendJson(res,200,{comment:fallback,source:'smart-local',message:'Online AI was unavailable. Smart Local comment generated instead.'});}
   }
+  if(req.method==='POST'&&pathname==='/api/recovery/restore'){const b=await readJson(req);const current=readLocal(workspaceKey);writeRecoverySnapshot(workspaceKey,current,'Before restoring an older version',true);const restored=readRecoverySnapshot(workspaceKey,b.snapshotId);writeLocal(workspaceKey,restored);const c=ctx(restored),user=c.standaloneUser();return sendJson(res,200,{restored:true,state:stateForUser(restored,user,workspaceKey)});}
+  if(req.method!=='GET'){const current=readLocal(workspaceKey);const force=req.method==='DELETE'||pathname==='/api/restore';writeRecoverySnapshot(workspaceKey,current,force?'Before deletion or restore':'Automatic recovery',force);}
   const result=await withWorkspace(workspaceKey,db=>workspaceApi(db,workspaceKey,req,urlObj));return sendJson(res,result.status,result.body);
 }
 

@@ -1,8 +1,8 @@
 {
   "name": "reportform-zm",
-  "version": "3.1.5",
+  "version": "3.1.6",
   "private": true,
-  "description": "Simple local-workspace class report app for CBC and OBC assessments",
+  "description": "Local-workspace class report app with automatic recovery, recycle bin, CBC and OBC assessments",
   "scripts": {
     "start": "node server.js"
   },
