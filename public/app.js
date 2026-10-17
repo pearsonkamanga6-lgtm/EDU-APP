@@ -1,7 +1,7 @@
 (() => {
-  const APP_VERSION='3.1.6';
+  const APP_VERSION='3.1.7';
   const app=document.getElementById('app');
-  const state={me:null,page:'home',saveTimer:null,recoveryTimer:null,recoveryBusy:false};
+  const state={me:null,page:'home',saveTimer:null,recoveryTimer:null,mirrorTimer:null,recoveryBusy:false,mirrorBusy:false};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
   const byId=id=>document.getElementById(id);
   const BASE_ASSESSMENT_OPTIONS=['Week 4 Assessment','Week 8 Assessment','End of Term Test'];
@@ -21,16 +21,65 @@
     return `<div class="workflow-bar">${items.map(([key,n,label])=>`<div class="workflow-step ${key===step?'current':''} ${done[key]?'done':''}"><span>${done[key]&&key!==step?'✓':n}</span><b>${label}</b></div>`).join('')}</div>`;
   }
 
-  const DEVICE_RECOVERY_KEY='reportform_zm_device_recovery_v316';
-  function loadDeviceRecoveries(){try{const v=JSON.parse(localStorage.getItem(DEVICE_RECOVERY_KEY)||'[]');return Array.isArray(v)?v:[];}catch{return[];}}
-  function saveDeviceRecoveries(list){try{localStorage.setItem(DEVICE_RECOVERY_KEY,JSON.stringify(list.slice(0,8)));return true;}catch{return false;}}
+  const ONE_YEAR_MS=365*24*60*60*1000;
+  const DEVICE_VAULT_DB='reportform_zm_device_vault_v317';
+  const DEVICE_MIRROR_LS_KEY='reportform_zm_device_mirror_v317';
+  const LEGACY_RECOVERY_KEYS=['reportform_zm_device_recovery_v316'];
+  let vaultPromise=null,legacyMigrated=false;
+  function openDeviceVault(){
+    if(vaultPromise)return vaultPromise;
+    vaultPromise=new Promise((resolve,reject)=>{
+      if(!('indexedDB'in window)){reject(new Error('IndexedDB unavailable'));return;}
+      const req=indexedDB.open(DEVICE_VAULT_DB,1);
+      req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('mirror'))db.createObjectStore('mirror',{keyPath:'id'});if(!db.objectStoreNames.contains('snapshots'))db.createObjectStore('snapshots',{keyPath:'id'});};
+      req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error||new Error('Device vault unavailable'));
+    });
+    return vaultPromise;
+  }
+  async function requestPersistentStorage(){try{if(navigator.storage?.persist)await navigator.storage.persist();}catch{}}
+  async function vaultPut(store,value){const db=await openDeviceVault();return new Promise((resolve,reject)=>{const tx=db.transaction(store,'readwrite');tx.objectStore(store).put(value);tx.oncomplete=()=>resolve(true);tx.onerror=()=>reject(tx.error);});}
+  async function vaultGet(store,key){const db=await openDeviceVault();return new Promise((resolve,reject)=>{const tx=db.transaction(store,'readonly'),req=tx.objectStore(store).get(key);req.onsuccess=()=>resolve(req.result||null);req.onerror=()=>reject(req.error);});}
+  async function vaultAll(store){const db=await openDeviceVault();return new Promise((resolve,reject)=>{const tx=db.transaction(store,'readonly'),req=tx.objectStore(store).getAll();req.onsuccess=()=>resolve(Array.isArray(req.result)?req.result:[]);req.onerror=()=>reject(req.error);});}
+  async function vaultDelete(store,key){try{const db=await openDeviceVault();await new Promise((resolve,reject)=>{const tx=db.transaction(store,'readwrite');tx.objectStore(store).delete(key);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});}catch{}}
   function backupHasData(payload){const d=payload?.data||payload;return !!((d?.pupils?.length||0)||(d?.subjects?.length||0)||(d?.classes||[]).some(x=>String(x?.teacherName||x?.schoolName||x?.name||'').trim())||Object.keys(d?.marks||{}).length);}
   async function fetchRawBackup(){const res=await fetch('/api/backup',{cache:'no-store'});const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.error||`Backup failed (${res.status})`);return data;}
+  function validVaultRecord(x){if(!x?.payload||!backupHasData(x.payload))return false;const t=new Date(x.at||0).getTime();return Number.isFinite(t)&&Date.now()-t<=ONE_YEAR_MS;}
+  async function saveDeviceMirror(payload,reason='Latest saved class data'){
+    if(!backupHasData(payload))return false;
+    const now=Date.now(),rec={id:'latest',at:new Date(now).toISOString(),keepUntil:new Date(now+ONE_YEAR_MS).toISOString(),reason,payload};
+    try{await vaultPut('mirror',rec);}catch(err){console.warn('Device vault mirror failed',err);}
+    try{const raw=JSON.stringify(rec);if(raw.length<3500000)localStorage.setItem(DEVICE_MIRROR_LS_KEY,raw);}catch(err){console.warn('Local mirror fallback failed',err);}
+    return true;
+  }
+  async function loadDeviceMirror(){
+    let rec=null;try{rec=await vaultGet('mirror','latest');}catch{}
+    if(!rec){try{rec=JSON.parse(localStorage.getItem(DEVICE_MIRROR_LS_KEY)||'null');}catch{rec=null;}}
+    if(!validVaultRecord(rec)){if(rec){await vaultDelete('mirror','latest');try{localStorage.removeItem(DEVICE_MIRROR_LS_KEY);}catch{}}return null;}
+    return rec;
+  }
+  async function migrateLegacyRecoveries(){
+    if(legacyMigrated)return;legacyMigrated=true;
+    for(const key of LEGACY_RECOVERY_KEYS){let arr=[];try{arr=JSON.parse(localStorage.getItem(key)||'[]');}catch{}if(!Array.isArray(arr))continue;for(const x of arr){if(!validVaultRecord(x))continue;try{await vaultPut('snapshots',{...x,keepUntil:new Date(new Date(x.at).getTime()+ONE_YEAR_MS).toISOString(),legacy:true});}catch{}}}
+  }
+  async function pruneDeviceVault(){
+    let all=[];try{all=await vaultAll('snapshots');}catch{return;}
+    const now=Date.now(),valid=all.filter(x=>validVaultRecord(x)).sort((a,b)=>String(b.at).localeCompare(String(a.at)));
+    const keep=new Set(),daily=new Set();
+    for(const x of valid){const age=now-new Date(x.at).getTime();if(age<=48*60*60*1000){keep.add(x.id);continue;}const day=String(x.at).slice(0,10);if(!daily.has(day)){daily.add(day);keep.add(x.id);}}
+    for(const x of all){if(!keep.has(x.id))await vaultDelete('snapshots',x.id);}
+  }
+  async function loadDeviceRecoveries(limit=30){await migrateLegacyRecoveries();await pruneDeviceVault();let all=[];try{all=await vaultAll('snapshots');}catch{}return all.filter(validVaultRecord).sort((a,b)=>String(b.at).localeCompare(String(a.at))).slice(0,limit);}
+  async function getDeviceRecovery(id){await migrateLegacyRecoveries();try{const x=await vaultGet('snapshots',id);return validVaultRecord(x)?x:null;}catch{return null;}}
+  async function captureDeviceMirror(reason='Latest saved class data'){
+    if(state.mirrorBusy)return;state.mirrorBusy=true;
+    try{const payload=await fetchRawBackup();await saveDeviceMirror(payload,reason);}catch(err){console.warn('Immediate device mirror failed',err);}finally{state.mirrorBusy=false;}
+  }
+  function scheduleDeviceMirror(reason='Latest saved class data'){clearTimeout(state.mirrorTimer);state.mirrorTimer=setTimeout(()=>captureDeviceMirror(reason),250);}
   async function captureDeviceRecovery(reason='Automatic recovery',force=false){
     if(state.recoveryBusy)return;state.recoveryBusy=true;
-    try{const list=loadDeviceRecoveries(),now=Date.now();if(!force&&list[0]&&now-new Date(list[0].at).getTime()<10*60*1000)return;const payload=await fetchRawBackup();if(!backupHasData(payload))return;const raw=JSON.stringify(payload);if(raw.length>750000)return;const snap={id:`device_${now}`,at:new Date(now).toISOString(),reason,payload};const next=[snap,...list.filter(x=>x&&x.id!==snap.id)].slice(0,8);saveDeviceRecoveries(next);}catch(err){console.warn('Device recovery snapshot failed',err);}finally{state.recoveryBusy=false;}
+    try{await migrateLegacyRecoveries();const recent=await loadDeviceRecoveries(1),now=Date.now();if(!force&&recent[0]&&now-new Date(recent[0].at).getTime()<10*60*1000)return;const payload=await fetchRawBackup();if(!backupHasData(payload))return;await saveDeviceMirror(payload,'Latest saved class data');const snap={id:`device_${now}_${Math.random().toString(36).slice(2,7)}`,at:new Date(now).toISOString(),keepUntil:new Date(now+ONE_YEAR_MS).toISOString(),reason,payload};await vaultPut('snapshots',snap);await pruneDeviceVault();}catch(err){console.warn('Device recovery snapshot failed',err);}finally{state.recoveryBusy=false;}
   }
-  function scheduleDeviceRecovery(reason='Automatic recovery',force=false){clearTimeout(state.recoveryTimer);state.recoveryTimer=setTimeout(()=>captureDeviceRecovery(reason,force),500);}
+  function scheduleDeviceRecovery(reason='Automatic recovery',force=false){clearTimeout(state.recoveryTimer);state.recoveryTimer=setTimeout(()=>captureDeviceRecovery(reason,force),600);}
 
   async function api(path,opts={}){
     const headers={...(opts.headers||{})};
@@ -38,11 +87,11 @@
     const body=opts.body&&typeof opts.body!=='string'?JSON.stringify(opts.body):opts.body;
     const method=String(opts.method||'GET').toUpperCase();
     const mutating=method!=='GET'&&!['/api/backup','/api/recovery/restore'].includes(path);
-    if(mutating&&method==='DELETE')await captureDeviceRecovery('Before deletion',true);
+    if(mutating)await captureDeviceRecovery(method==='DELETE'?'Before deletion':'Before recent changes',method==='DELETE');
     const res=await fetch(path,{...opts,headers,body,cache:'no-store'});
     const data=await res.json().catch(()=>({}));
     if(!res.ok) throw new Error(data.error||`Request failed (${res.status})`);
-    if(mutating)scheduleDeviceRecovery(method==='DELETE'?'After deletion':'Automatic recovery',method==='DELETE');
+    if(mutating){scheduleDeviceMirror('Latest saved class data');scheduleDeviceRecovery(method==='DELETE'?'After deletion':'Automatic recovery',method==='DELETE');}
     return data;
   }
 
@@ -67,16 +116,20 @@
   }
 
   async function bootstrap(){
+    await requestPersistentStorage();
+    await migrateLegacyRecoveries();
     state.me=await api('/api/class-data');
-    const recoveries=loadDeviceRecoveries();
+    const mirror=await loadDeviceMirror(),recoveries=await loadDeviceRecoveries(1);
     const currentEmpty=!profileComplete()&&(state.me?.subjects?.length||0)===0&&(state.me?.pupils?.length||0)===0;
-    if(currentEmpty&&recoveries[0]?.payload&&backupHasData(recoveries[0].payload)){
-      const when=new Date(recoveries[0].at).toLocaleString();
-      if(confirm(`A previous class recovery copy from ${when} was found on this device. Restore it now?`)){try{const r=await api('/api/restore',{method:'POST',body:recoveries[0].payload});state.me=r.state;toast('Previous class data restored');}catch(err){console.warn(err);}}
+    const candidate=(mirror?.payload&&backupHasData(mirror.payload))?mirror:(recoveries[0]?.payload&&backupHasData(recoveries[0].payload)?recoveries[0]:null);
+    if(currentEmpty&&candidate){
+      const when=new Date(candidate.at).toLocaleString();
+      if(confirm(`A protected class copy from ${when} was found on this device. Restore it now?`)){try{const r=await api('/api/restore',{method:'POST',body:candidate.payload});state.me=r.state;toast('Protected class data restored');}catch(err){console.warn(err);}}
     }
     renderShell();
     const first=!profileComplete()?'setup':(state.me?.subjects?.length||0)===0?'subjects':(state.me?.pupils?.length||0)===0?'pupils':'home';
-    navigate(first);scheduleDeviceRecovery('App opened');
+    navigate(first);scheduleDeviceMirror('App opened');scheduleDeviceRecovery('App opened');
+    setInterval(()=>captureDeviceMirror('Automatic device mirror'),5*60*1000);
     setInterval(()=>captureDeviceRecovery('Automatic periodic recovery'),15*60*1000);
   }
   function setupComplete(){return (state.me?.subjects?.length||0)>0&&(state.me?.pupils?.length||0)>0;}
@@ -143,21 +196,22 @@
   }
 
   async function restoreDeleted(kind,id,name){if(!confirm(`Restore ${name}?`))return;try{const r=await api(`/api/trash/${kind}/${encodeURIComponent(id)}/restore`,{method:'POST'});state.me=r.state;closeRecoveryCenter();toast(`${name} restored`);navigate('home');}catch(err){toast(err.message,true);}}
-  async function restoreDeviceSnapshot(id){const snap=loadDeviceRecoveries().find(x=>x.id===id);if(!snap)return toast('Recovery copy not found',true);if(!confirm(`Restore the class as it was on ${new Date(snap.at).toLocaleString()}? Current changes will be replaced.`))return;try{await captureDeviceRecovery('Before restoring device recovery',true);const r=await api('/api/restore',{method:'POST',body:snap.payload});state.me=r.state;closeRecoveryCenter();toast('Earlier version restored');renderShell();navigate('home');}catch(err){toast(err.message,true);}}
+  async function restoreDeviceSnapshot(id){const snap=await getDeviceRecovery(id);if(!snap)return toast('Recovery copy not found',true);if(!confirm(`Restore the class as it was on ${new Date(snap.at).toLocaleString()}? Current changes will be replaced.`))return;try{await captureDeviceRecovery('Before restoring device recovery',true);const r=await api('/api/restore',{method:'POST',body:snap.payload});state.me=r.state;await saveDeviceMirror(snap.payload,'Restored class data');closeRecoveryCenter();toast('Earlier version restored');renderShell();navigate('home');}catch(err){toast(err.message,true);}}
+  async function restoreDeviceMirror(){const snap=await loadDeviceMirror();if(!snap)return toast('Protected device copy not found',true);if(!confirm(`Restore the latest protected copy from ${new Date(snap.at).toLocaleString()}? Current changes will be replaced.`))return;try{await captureDeviceRecovery('Before restoring protected copy',true);const r=await api('/api/restore',{method:'POST',body:snap.payload});state.me=r.state;closeRecoveryCenter();toast('Protected device copy restored');renderShell();navigate('home');}catch(err){toast(err.message,true);}}
   async function restoreServerSnapshot(id,at){if(!confirm(`Restore the server recovery copy from ${new Date(at).toLocaleString()}? Current changes will be replaced.`))return;try{await captureDeviceRecovery('Before restoring server recovery',true);const r=await api('/api/recovery/restore',{method:'POST',body:{snapshotId:id}});state.me=r.state;closeRecoveryCenter();toast('Server recovery restored');renderShell();navigate('home');}catch(err){toast(err.message,true);}}
   function closeRecoveryCenter(){document.getElementById('recoveryModal')?.remove();}
-  function openRecoveryCenter(){
-    const d=state.me||{},device=loadDeviceRecoveries(),server=d.recovery?.serverSnapshots||[],tp=d.trash?.pupils||[],ts=d.trash?.subjects||[];
+  async function openRecoveryCenter(){
+    const d=state.me||{},device=await loadDeviceRecoveries(30),mirror=await loadDeviceMirror(),server=d.recovery?.serverSnapshots||[],tp=d.trash?.pupils||[],ts=d.trash?.subjects||[];
     const modal=document.createElement('div');modal.id='recoveryModal';modal.className='recovery-overlay';
     const fmt=x=>x?new Date(x).toLocaleString():'Unknown time';
     modal.innerHTML=`<div class="recovery-modal"><div class="recovery-head"><div><h2>Recovery Centre</h2><p>Restore accidentally deleted records or return the class to an earlier saved version.</p></div><button id="closeRecovery" class="icon-close">×</button></div>
       <section class="recovery-section"><h3>Recycle Bin</h3>${(!tp.length&&!ts.length)?'<p class="recovery-empty">No deleted pupils or subjects.</p>':`${tp.map(x=>`<div class="recovery-row"><div><b>👤 ${esc(x.name)}</b><small>Deleted ${esc(fmt(x.removedAt))}</small></div><button class="btn ghost small" data-restore-pupil="${esc(x.id)}" data-name="${esc(x.name)}">Restore</button></div>`).join('')}${ts.map(x=>`<div class="recovery-row"><div><b>📘 ${esc(x.name)}</b><small>Deleted ${esc(fmt(x.removedAt))}</small></div><button class="btn ghost small" data-restore-subject="${esc(x.id)}" data-name="${esc(x.name)}">Restore</button></div>`).join('')}`}</section>
-      <section class="recovery-section"><h3>Automatic copies on this device</h3><p class="recovery-note">The app keeps rolling recovery copies automatically. These can survive an accidental deletion or a later server reset as long as this browser's storage is not cleared.</p>${device.length?device.map(x=>`<div class="recovery-row"><div><b>${esc(x.reason||'Automatic recovery')}</b><small>${esc(fmt(x.at))}</small></div><button class="btn ghost small" data-device-recovery="${esc(x.id)}">Restore</button></div>`).join(''):'<p class="recovery-empty">No automatic device copies yet.</p>'}</section>
+      <section class="recovery-section"><h3>One-year protection on this device</h3><p class="recovery-note">Every successful save updates a full protected copy on this device. It is retained for 365 days from the latest save, and rolling recovery points are also kept for up to one year unless this browser/app storage is cleared.</p>${mirror?`<div class="recovery-row protected"><div><b>🛡 Latest protected class copy</b><small>Saved ${esc(fmt(mirror.at))} • protected until ${esc(fmt(mirror.keepUntil))}</small></div><button class="btn primary small" id="restoreDeviceMirror">Restore</button></div>`:'<p class="recovery-empty">No protected device copy yet.</p>'}${device.length?device.map(x=>`<div class="recovery-row"><div><b>${esc(x.reason||'Automatic recovery')}</b><small>${esc(fmt(x.at))}</small></div><button class="btn ghost small" data-device-recovery="${esc(x.id)}">Restore</button></div>`).join(''):'<p class="recovery-empty">No earlier recovery points yet.</p>'}</section>
       <section class="recovery-section"><h3>Recent server recovery copies</h3>${server.length?server.map(x=>`<div class="recovery-row"><div><b>${esc(x.reason||'Automatic recovery')}</b><small>${esc(fmt(x.at))}</small></div><button class="btn ghost small" data-server-recovery="${esc(x.id)}" data-at="${esc(x.at)}">Restore</button></div>`).join(''):'<p class="recovery-empty">No server recovery copies yet.</p>'}</section>
       <div class="recovery-footer"><button id="makeRecoveryNow" class="btn primary">Save Recovery Copy Now</button><button id="closeRecovery2" class="btn ghost">Close</button></div></div>`;
     document.body.appendChild(modal);byId('closeRecovery').onclick=closeRecoveryCenter;byId('closeRecovery2').onclick=closeRecoveryCenter;modal.onclick=e=>{if(e.target===modal)closeRecoveryCenter();};
-    modal.querySelectorAll('[data-restore-pupil]').forEach(b=>b.onclick=()=>restoreDeleted('pupils',b.dataset.restorePupil,b.dataset.name));modal.querySelectorAll('[data-restore-subject]').forEach(b=>b.onclick=()=>restoreDeleted('subjects',b.dataset.restoreSubject,b.dataset.name));modal.querySelectorAll('[data-device-recovery]').forEach(b=>b.onclick=()=>restoreDeviceSnapshot(b.dataset.deviceRecovery));modal.querySelectorAll('[data-server-recovery]').forEach(b=>b.onclick=()=>restoreServerSnapshot(b.dataset.serverRecovery,b.dataset.at));
-    byId('makeRecoveryNow').onclick=async()=>{await captureDeviceRecovery('Manual recovery copy',true);toast('Recovery copy saved');closeRecoveryCenter();await refresh();openRecoveryCenter();};
+    modal.querySelectorAll('[data-restore-pupil]').forEach(b=>b.onclick=()=>restoreDeleted('pupils',b.dataset.restorePupil,b.dataset.name));modal.querySelectorAll('[data-restore-subject]').forEach(b=>b.onclick=()=>restoreDeleted('subjects',b.dataset.restoreSubject,b.dataset.name));modal.querySelectorAll('[data-device-recovery]').forEach(b=>b.onclick=()=>restoreDeviceSnapshot(b.dataset.deviceRecovery));modal.querySelectorAll('[data-server-recovery]').forEach(b=>b.onclick=()=>restoreServerSnapshot(b.dataset.serverRecovery,b.dataset.at));if(byId('restoreDeviceMirror'))byId('restoreDeviceMirror').onclick=restoreDeviceMirror;
+    byId('makeRecoveryNow').onclick=async()=>{await captureDeviceMirror('Manual protected copy');await captureDeviceRecovery('Manual recovery copy',true);toast('Protected recovery copy saved');closeRecoveryCenter();await refresh();await openRecoveryCenter();};
   }
 
   function renderHome(c){
@@ -165,7 +219,7 @@
     const schoolType=d.class?.schoolType==='BOARDING'?'Boarding School':'Day School';
     const continueHtml=ps.next?`<button id="continuePupil" class="btn primary big full continue-work">Continue ${esc(ps.next.p.name)} — ${ps.next.m.summary.completedCount}/${ps.next.m.summary.total} subjects →</button>`:(d.pupils?.length?'<div class="all-complete-banner">✓ All pupils have been checked for this assessment.</div>':'');
     const calendar=schoolCalendarLabel(d);
-    const storageBanner=`<div class="cloud-status ok">✓ Private teacher workspace active — no database setup required. Each browser has its own class workspace. Download a backup before major updates or changing device.</div>`;
+    const storageBanner=`<div class="cloud-status ok">✓ One-year device protection active — every successful save keeps a full class copy on this browser for 365 days. Use Download Backup before changing device or clearing browser data.</div>`;
     c.innerHTML=`<section class="hero"><span class="eyebrow">CLASS TEACHER MODE</span><h1>${esc(d.class?.name||'My Class')}</h1><p>${esc(assessmentLabel(d))} • ${esc(d.class?.term||'Term 1')} ${esc(d.class?.academicYear||new Date().getFullYear())} • ${esc(schoolType)} • ${esc(d.class?.gradingSystem==='CBC'?'CBC':'OBC')} grading</p>${calendar?`<div class="hero-calendar">${esc(calendar)}</div>`:''}<div class="progress"><span style="width:${pct}%"></span></div><small>${completedCells}/${total} subject entries checked for this assessment</small></section>
       ${storageBanner}
       <div class="dashboard-stats"><div><b>${d.pupils?.length||0}</b><span>Pupils</span></div><div><b>${ps.complete}</b><span>Complete</span></div><div><b>${ps.inProgress}</b><span>In progress</span></div><div><b>${ps.notStarted}</b><span>Not started</span></div></div>
@@ -179,7 +233,7 @@
         <button class="action-card" data-go="reports"><b>4. ▤ Reports</b><span>Class position, TOTAL SAT, AI comment, PDF and WhatsApp.</span></button>
         <button class="action-card" data-go="results"><b>✎ Results Grid</b><span>Use this when you need to review or correct several marks.</span></button>
       </div>
-      <section class="backup-card"><div><b>Data Protection & Recovery</b><span>Automatic recovery copies are kept on this device. Deleted pupils and subjects can also be restored from the Recycle Bin.</span></div><div class="backup-actions"><button id="openRecovery" class="btn primary">Recovery Centre</button><button id="downloadBackup" class="btn ghost">Download Backup</button><button id="restoreBackup" class="btn ghost">Restore File</button></div></section>`;
+      <section class="backup-card"><div><b>Data Protection & Recovery</b><span>Every save updates a protected device copy kept for 365 days. Earlier recovery points and deleted pupils/subjects can also be restored.</span></div><div class="backup-actions"><button id="openRecovery" class="btn primary">Recovery Centre</button><button id="downloadBackup" class="btn ghost">Download Backup</button><button id="restoreBackup" class="btn ghost">Restore File</button></div></section>`;
     c.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>navigate(b.dataset.go));
     if(byId('startNextAssessment'))byId('startNextAssessment').onclick=()=>startAssessment(nextAssessment);
     if(byId('continuePupil'))byId('continuePupil').onclick=()=>openGuidedResults(ps.next.p.id,firstMissingSubjectIndex(ps.next.p.id));
