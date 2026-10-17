@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.1.6';
+const APP_VERSION = '3.1.7';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -133,7 +133,7 @@ function listRecoverySnapshots(key){
   try{return fs.readdirSync(dir).filter(n=>n.endsWith('.json')).map(name=>{const file=path.join(dir,name);const st=fs.statSync(file);let meta={};try{const raw=JSON.parse(fs.readFileSync(file,'utf8'));meta=raw?._recovery||{};}catch{}return{id:name,at:meta.at||st.mtime.toISOString(),reason:meta.reason||'Automatic recovery',size:st.size};}).sort((a,b)=>String(b.at).localeCompare(String(a.at)));}catch{return [];}
 }
 function writeRecoverySnapshot(key,db,reason='Automatic recovery',force=false){
-  try{if(!dbHasMeaningfulData(db))return null;const dir=recoveryWorkspaceDir(key),existing=listRecoverySnapshots(key),now=Date.now();if(!force&&existing[0]&&now-new Date(existing[0].at).getTime()<10*60*1000)return existing[0];const at=nowIso(),safeAt=at.replace(/[:.]/g,'-'),name=`${safeAt}_${crypto.randomBytes(3).toString('hex')}.json`,payload={_recovery:{at,reason,appVersion:APP_VERSION},data:db};fs.writeFileSync(path.join(dir,name),JSON.stringify(payload));const all=listRecoverySnapshots(key);for(const item of all.slice(20)){try{fs.unlinkSync(path.join(dir,item.id));}catch{}}for(const item of all){if(now-new Date(item.at).getTime()>14*24*60*60*1000){try{fs.unlinkSync(path.join(dir,item.id));}catch{}}}return{id:name,at,reason};}catch(err){console.warn('Recovery snapshot failed:',err.message);return null;}
+  try{if(!dbHasMeaningfulData(db))return null;const dir=recoveryWorkspaceDir(key),existing=listRecoverySnapshots(key),now=Date.now();if(!force&&existing[0]&&now-new Date(existing[0].at).getTime()<10*60*1000)return existing[0];const at=nowIso(),safeAt=at.replace(/[:.]/g,'-'),name=`${safeAt}_${crypto.randomBytes(3).toString('hex')}.json`,payload={_recovery:{at,reason,appVersion:APP_VERSION},data:db};fs.writeFileSync(path.join(dir,name),JSON.stringify(payload));const all=listRecoverySnapshots(key);for(const item of all.slice(120)){try{fs.unlinkSync(path.join(dir,item.id));}catch{}}for(const item of all){if(now-new Date(item.at).getTime()>365*24*60*60*1000){try{fs.unlinkSync(path.join(dir,item.id));}catch{}}}return{id:name,at,reason};}catch(err){console.warn('Recovery snapshot failed:',err.message);return null;}
 }
 function readRecoverySnapshot(key,snapshotId){const id=path.basename(String(snapshotId||''));if(!id.endsWith('.json'))throw new Error('Invalid recovery snapshot');const file=path.join(recoveryWorkspaceDir(key),id);if(!fs.existsSync(file))throw Object.assign(new Error('Recovery snapshot not found'),{status:404});const raw=JSON.parse(fs.readFileSync(file,'utf8'));return migrateDb(raw?.data||raw);}
 
