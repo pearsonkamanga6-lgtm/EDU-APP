@@ -1,7 +1,7 @@
 (() => {
-  const APP_VERSION='3.1.5';
+  const APP_VERSION='3.1.6';
   const app=document.getElementById('app');
-  const state={me:null,page:'home',saveTimer:null};
+  const state={me:null,page:'home',saveTimer:null,recoveryTimer:null,recoveryBusy:false};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
   const byId=id=>document.getElementById(id);
   const BASE_ASSESSMENT_OPTIONS=['Week 4 Assessment','Week 8 Assessment','End of Term Test'];
@@ -21,13 +21,28 @@
     return `<div class="workflow-bar">${items.map(([key,n,label])=>`<div class="workflow-step ${key===step?'current':''} ${done[key]?'done':''}"><span>${done[key]&&key!==step?'✓':n}</span><b>${label}</b></div>`).join('')}</div>`;
   }
 
+  const DEVICE_RECOVERY_KEY='reportform_zm_device_recovery_v316';
+  function loadDeviceRecoveries(){try{const v=JSON.parse(localStorage.getItem(DEVICE_RECOVERY_KEY)||'[]');return Array.isArray(v)?v:[];}catch{return[];}}
+  function saveDeviceRecoveries(list){try{localStorage.setItem(DEVICE_RECOVERY_KEY,JSON.stringify(list.slice(0,8)));return true;}catch{return false;}}
+  function backupHasData(payload){const d=payload?.data||payload;return !!((d?.pupils?.length||0)||(d?.subjects?.length||0)||(d?.classes||[]).some(x=>String(x?.teacherName||x?.schoolName||x?.name||'').trim())||Object.keys(d?.marks||{}).length);}
+  async function fetchRawBackup(){const res=await fetch('/api/backup',{cache:'no-store'});const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.error||`Backup failed (${res.status})`);return data;}
+  async function captureDeviceRecovery(reason='Automatic recovery',force=false){
+    if(state.recoveryBusy)return;state.recoveryBusy=true;
+    try{const list=loadDeviceRecoveries(),now=Date.now();if(!force&&list[0]&&now-new Date(list[0].at).getTime()<10*60*1000)return;const payload=await fetchRawBackup();if(!backupHasData(payload))return;const raw=JSON.stringify(payload);if(raw.length>750000)return;const snap={id:`device_${now}`,at:new Date(now).toISOString(),reason,payload};const next=[snap,...list.filter(x=>x&&x.id!==snap.id)].slice(0,8);saveDeviceRecoveries(next);}catch(err){console.warn('Device recovery snapshot failed',err);}finally{state.recoveryBusy=false;}
+  }
+  function scheduleDeviceRecovery(reason='Automatic recovery',force=false){clearTimeout(state.recoveryTimer);state.recoveryTimer=setTimeout(()=>captureDeviceRecovery(reason,force),500);}
+
   async function api(path,opts={}){
     const headers={...(opts.headers||{})};
     if(opts.body) headers['Content-Type']='application/json';
     const body=opts.body&&typeof opts.body!=='string'?JSON.stringify(opts.body):opts.body;
+    const method=String(opts.method||'GET').toUpperCase();
+    const mutating=method!=='GET'&&!['/api/backup','/api/recovery/restore'].includes(path);
+    if(mutating&&method==='DELETE')await captureDeviceRecovery('Before deletion',true);
     const res=await fetch(path,{...opts,headers,body,cache:'no-store'});
     const data=await res.json().catch(()=>({}));
     if(!res.ok) throw new Error(data.error||`Request failed (${res.status})`);
+    if(mutating)scheduleDeviceRecovery(method==='DELETE'?'After deletion':'Automatic recovery',method==='DELETE');
     return data;
   }
 
@@ -53,9 +68,16 @@
 
   async function bootstrap(){
     state.me=await api('/api/class-data');
+    const recoveries=loadDeviceRecoveries();
+    const currentEmpty=!profileComplete()&&(state.me?.subjects?.length||0)===0&&(state.me?.pupils?.length||0)===0;
+    if(currentEmpty&&recoveries[0]?.payload&&backupHasData(recoveries[0].payload)){
+      const when=new Date(recoveries[0].at).toLocaleString();
+      if(confirm(`A previous class recovery copy from ${when} was found on this device. Restore it now?`)){try{const r=await api('/api/restore',{method:'POST',body:recoveries[0].payload});state.me=r.state;toast('Previous class data restored');}catch(err){console.warn(err);}}
+    }
     renderShell();
     const first=!profileComplete()?'setup':(state.me?.subjects?.length||0)===0?'subjects':(state.me?.pupils?.length||0)===0?'pupils':'home';
-    navigate(first);
+    navigate(first);scheduleDeviceRecovery('App opened');
+    setInterval(()=>captureDeviceRecovery('Automatic periodic recovery'),15*60*1000);
   }
   function setupComplete(){return (state.me?.subjects?.length||0)>0&&(state.me?.pupils?.length||0)>0;}
 
@@ -120,6 +142,24 @@
     input.click();
   }
 
+  async function restoreDeleted(kind,id,name){if(!confirm(`Restore ${name}?`))return;try{const r=await api(`/api/trash/${kind}/${encodeURIComponent(id)}/restore`,{method:'POST'});state.me=r.state;closeRecoveryCenter();toast(`${name} restored`);navigate('home');}catch(err){toast(err.message,true);}}
+  async function restoreDeviceSnapshot(id){const snap=loadDeviceRecoveries().find(x=>x.id===id);if(!snap)return toast('Recovery copy not found',true);if(!confirm(`Restore the class as it was on ${new Date(snap.at).toLocaleString()}? Current changes will be replaced.`))return;try{await captureDeviceRecovery('Before restoring device recovery',true);const r=await api('/api/restore',{method:'POST',body:snap.payload});state.me=r.state;closeRecoveryCenter();toast('Earlier version restored');renderShell();navigate('home');}catch(err){toast(err.message,true);}}
+  async function restoreServerSnapshot(id,at){if(!confirm(`Restore the server recovery copy from ${new Date(at).toLocaleString()}? Current changes will be replaced.`))return;try{await captureDeviceRecovery('Before restoring server recovery',true);const r=await api('/api/recovery/restore',{method:'POST',body:{snapshotId:id}});state.me=r.state;closeRecoveryCenter();toast('Server recovery restored');renderShell();navigate('home');}catch(err){toast(err.message,true);}}
+  function closeRecoveryCenter(){document.getElementById('recoveryModal')?.remove();}
+  function openRecoveryCenter(){
+    const d=state.me||{},device=loadDeviceRecoveries(),server=d.recovery?.serverSnapshots||[],tp=d.trash?.pupils||[],ts=d.trash?.subjects||[];
+    const modal=document.createElement('div');modal.id='recoveryModal';modal.className='recovery-overlay';
+    const fmt=x=>x?new Date(x).toLocaleString():'Unknown time';
+    modal.innerHTML=`<div class="recovery-modal"><div class="recovery-head"><div><h2>Recovery Centre</h2><p>Restore accidentally deleted records or return the class to an earlier saved version.</p></div><button id="closeRecovery" class="icon-close">×</button></div>
+      <section class="recovery-section"><h3>Recycle Bin</h3>${(!tp.length&&!ts.length)?'<p class="recovery-empty">No deleted pupils or subjects.</p>':`${tp.map(x=>`<div class="recovery-row"><div><b>👤 ${esc(x.name)}</b><small>Deleted ${esc(fmt(x.removedAt))}</small></div><button class="btn ghost small" data-restore-pupil="${esc(x.id)}" data-name="${esc(x.name)}">Restore</button></div>`).join('')}${ts.map(x=>`<div class="recovery-row"><div><b>📘 ${esc(x.name)}</b><small>Deleted ${esc(fmt(x.removedAt))}</small></div><button class="btn ghost small" data-restore-subject="${esc(x.id)}" data-name="${esc(x.name)}">Restore</button></div>`).join('')}`}</section>
+      <section class="recovery-section"><h3>Automatic copies on this device</h3><p class="recovery-note">The app keeps rolling recovery copies automatically. These can survive an accidental deletion or a later server reset as long as this browser's storage is not cleared.</p>${device.length?device.map(x=>`<div class="recovery-row"><div><b>${esc(x.reason||'Automatic recovery')}</b><small>${esc(fmt(x.at))}</small></div><button class="btn ghost small" data-device-recovery="${esc(x.id)}">Restore</button></div>`).join(''):'<p class="recovery-empty">No automatic device copies yet.</p>'}</section>
+      <section class="recovery-section"><h3>Recent server recovery copies</h3>${server.length?server.map(x=>`<div class="recovery-row"><div><b>${esc(x.reason||'Automatic recovery')}</b><small>${esc(fmt(x.at))}</small></div><button class="btn ghost small" data-server-recovery="${esc(x.id)}" data-at="${esc(x.at)}">Restore</button></div>`).join(''):'<p class="recovery-empty">No server recovery copies yet.</p>'}</section>
+      <div class="recovery-footer"><button id="makeRecoveryNow" class="btn primary">Save Recovery Copy Now</button><button id="closeRecovery2" class="btn ghost">Close</button></div></div>`;
+    document.body.appendChild(modal);byId('closeRecovery').onclick=closeRecoveryCenter;byId('closeRecovery2').onclick=closeRecoveryCenter;modal.onclick=e=>{if(e.target===modal)closeRecoveryCenter();};
+    modal.querySelectorAll('[data-restore-pupil]').forEach(b=>b.onclick=()=>restoreDeleted('pupils',b.dataset.restorePupil,b.dataset.name));modal.querySelectorAll('[data-restore-subject]').forEach(b=>b.onclick=()=>restoreDeleted('subjects',b.dataset.restoreSubject,b.dataset.name));modal.querySelectorAll('[data-device-recovery]').forEach(b=>b.onclick=()=>restoreDeviceSnapshot(b.dataset.deviceRecovery));modal.querySelectorAll('[data-server-recovery]').forEach(b=>b.onclick=()=>restoreServerSnapshot(b.dataset.serverRecovery,b.dataset.at));
+    byId('makeRecoveryNow').onclick=async()=>{await captureDeviceRecovery('Manual recovery copy',true);toast('Recovery copy saved');closeRecoveryCenter();await refresh();openRecoveryCenter();};
+  }
+
   function renderHome(c){
     const d=state.me,{total,completedCells}=stats(),pct=total?Math.round(completedCells/total*100):0,ps=progressSummary(d),nextAssessment=nextAssessmentName(assessmentLabel(d));
     const schoolType=d.class?.schoolType==='BOARDING'?'Boarding School':'Day School';
@@ -139,10 +179,11 @@
         <button class="action-card" data-go="reports"><b>4. ▤ Reports</b><span>Class position, TOTAL SAT, AI comment, PDF and WhatsApp.</span></button>
         <button class="action-card" data-go="results"><b>✎ Results Grid</b><span>Use this when you need to review or correct several marks.</span></button>
       </div>
-      <section class="backup-card"><div><b>Protect this class data</b><span>Keep a copy before app updates or when moving to another device.</span></div><div class="backup-actions"><button id="downloadBackup" class="btn ghost">Download Backup</button><button id="restoreBackup" class="btn ghost">Restore Backup</button></div></section>`;
+      <section class="backup-card"><div><b>Data Protection & Recovery</b><span>Automatic recovery copies are kept on this device. Deleted pupils and subjects can also be restored from the Recycle Bin.</span></div><div class="backup-actions"><button id="openRecovery" class="btn primary">Recovery Centre</button><button id="downloadBackup" class="btn ghost">Download Backup</button><button id="restoreBackup" class="btn ghost">Restore File</button></div></section>`;
     c.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>navigate(b.dataset.go));
     if(byId('startNextAssessment'))byId('startNextAssessment').onclick=()=>startAssessment(nextAssessment);
     if(byId('continuePupil'))byId('continuePupil').onclick=()=>openGuidedResults(ps.next.p.id,firstMissingSubjectIndex(ps.next.p.id));
+    if(byId('openRecovery'))byId('openRecovery').onclick=openRecoveryCenter;
     if(byId('downloadBackup'))byId('downloadBackup').onclick=downloadWorkspaceBackup;
     if(byId('restoreBackup'))byId('restoreBackup').onclick=restoreWorkspaceBackup;
   }
