@@ -1,8 +1,8 @@
 {
   "name": "reportform-zm",
-  "version": "3.1.8",
+  "version": "3.1.10",
   "private": true,
-  "description": "EduSend class report app with one-year device protection, screenshot OCR import, automatic recovery, recycle bin, CBC and OBC assessments",
+  "description": "EduSend class report app with one-year recovery and cache-safe multi-format results import for images, PDF, spreadsheets, DOCX and common school documents",
   "scripts": {
     "start": "node server.js"
   },
