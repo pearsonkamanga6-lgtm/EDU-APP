@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.1.10';
+const APP_VERSION = '3.1.11';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -263,7 +263,8 @@ async function workspaceApi(db,workspaceKey,req,urlObj){
     const rows=Array.isArray(b.rows)?b.rows.slice(0,120):[],subjects=c.classSubjects(cls.id),current=c.classPupils(cls.id);
     if(!rows.length)return{status:400,body:{error:'No pupil rows were supplied for import'}};
     const norm=v=>String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-    const map=new Map(current.map(p=>[norm(`${p.firstName||''}${p.surname||''}`)||norm(p.name),p]));
+    const map=new Map();
+    for(const p of current){const direct=norm(`${p.firstName||''}${p.surname||''}`)||norm(p.name),reverse=norm(`${p.surname||''}${p.firstName||''}`);if(direct)map.set(direct,p);if(reverse)map.set(reverse,p);}
     let created=0,matched=0,marksSaved=0,skipped=0;
     for(const row of rows){
       const firstName=String(row.firstName||'').trim(),surname=String(row.surname||'').trim(),sex=String(row.sex||'').trim().toUpperCase().slice(0,1);
@@ -276,7 +277,9 @@ async function workspaceApi(db,workspaceKey,req,urlObj){
         db.pupils.push(pupil);map.set(key,pupil);created++;
       }else{
         matched++;
-        if(['F','M'].includes(sex)&&!['F','M'].includes(String(pupil.sex||'').toUpperCase()))pupil.sex=sex;
+        pupil.firstName=firstName;pupil.surname=surname;pupil.name=`${firstName} ${surname}`.replace(/\s+/g,' ').trim();
+        if(['F','M'].includes(sex))pupil.sex=sex;
+        map.set(norm(firstName+surname),pupil);map.set(norm(surname+firstName),pupil);
       }
       if(String(b.mode||'').toUpperCase()==='RESULTS'&&Array.isArray(row.marks)){
         for(let i=0;i<subjects.length&&i<row.marks.length;i++){
