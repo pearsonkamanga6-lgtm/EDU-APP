@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.1.7';
+const APP_VERSION = '3.1.8';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -257,6 +257,37 @@ async function workspaceApi(db,workspaceKey,req,urlObj){
   const subjectMatch=pathname.match(/^\/api\/subjects\/([^/]+)$/);
   if(subjectMatch&&req.method==='PUT'){const cls=c.userClass(user.id),subject=cls&&db.subjects.find(s=>s.id===decodeURIComponent(subjectMatch[1])&&s.classId===cls.id&&s.active!==false);if(!subject)return{status:404,body:{error:'Subject not found'}};const b=await readJson(req),name=String(b.name||'').trim().replace(/\s+/g,' ');if(!name)return{status:400,body:{error:'Enter the subject name'}};if(c.classSubjects(cls.id).some(s=>s.id!==subject.id&&s.name.toLowerCase()===name.toLowerCase()))return{status:409,body:{error:'That subject is already in this class'}};subject.name=name;return{status:200,body:{subject,state:stateForUser(db,user,workspaceKey)}};}
   if(subjectMatch&&req.method==='DELETE'){const cls=c.userClass(user.id),subject=cls&&db.subjects.find(s=>s.id===decodeURIComponent(subjectMatch[1])&&s.classId===cls.id&&s.active!==false);if(!subject)return{status:404,body:{error:'Subject not found'}};subject.active=false;subject.removedAt=nowIso();return{status:200,body:{removed:true,state:stateForUser(db,user,workspaceKey)}};}
+
+  if(req.method==='POST'&&pathname==='/api/screenshot-import'){
+    const b=await readJson(req),cls=c.userClass(user.id),assessment=c.userAssessment(user.id);if(!cls||!assessment)return{status:404,body:{error:'Class or assessment not found'}};
+    const rows=Array.isArray(b.rows)?b.rows.slice(0,120):[],subjects=c.classSubjects(cls.id),current=c.classPupils(cls.id);
+    if(!rows.length)return{status:400,body:{error:'No pupil rows were supplied for import'}};
+    const norm=v=>String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    const map=new Map(current.map(p=>[norm(`${p.firstName||''}${p.surname||''}`)||norm(p.name),p]));
+    let created=0,matched=0,marksSaved=0,skipped=0;
+    for(const row of rows){
+      const firstName=String(row.firstName||'').trim(),surname=String(row.surname||'').trim(),sex=String(row.sex||'').trim().toUpperCase().slice(0,1);
+      if(!firstName||!surname){skipped++;continue;}
+      const key=norm(firstName+surname);let pupil=map.get(key);
+      if(!pupil){
+        if(c.classPupils(cls.id).length>=120)break;
+        if(!['F','M'].includes(sex)){skipped++;continue;}
+        pupil={id:id('p'),classId:cls.id,firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex,examNo:'',parentPhone:'',classTeacherComment:'',comments:{},active:true,createdAt:nowIso()};
+        db.pupils.push(pupil);map.set(key,pupil);created++;
+      }else{
+        matched++;
+        if(['F','M'].includes(sex)&&!['F','M'].includes(String(pupil.sex||'').toUpperCase()))pupil.sex=sex;
+      }
+      if(String(b.mode||'').toUpperCase()==='RESULTS'&&Array.isArray(row.marks)){
+        for(let i=0;i<subjects.length&&i<row.marks.length;i++){
+          const raw=row.marks[i];if(raw===null||raw===undefined||raw==='')continue;
+          const mark=cleanMark(raw);if(mark===null)continue;
+          db.marks[c.markKey(assessment.id,pupil.id,subjects[i].id)]=mark;marksSaved++;
+        }
+      }
+    }
+    return{status:200,body:{created,matched,marksSaved,skipped,state:stateForUser(db,user,workspaceKey)}};
+  }
   if(req.method==='POST'&&pathname==='/api/pupils'){
     const b=await readJson(req),cls=c.userClass(user.id);if(!cls)return{status:404,body:{error:'Class not found'}};if(c.classPupils(cls.id).length>=120)return{status:400,body:{error:'This class already has the maximum of 120 pupils'}};const firstName=String(b.firstName||'').trim(),surname=String(b.surname||'').trim(),sex=String(b.sex||'').trim().toUpperCase().slice(0,1);if(!firstName||!surname)return{status:400,body:{error:'Enter both first name and surname'}};if(!['F','M'].includes(sex))return{status:400,body:{error:'Select the pupil sex: Male or Female'}};const pupil={id:id('p'),classId:cls.id,firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex,examNo:String(b.examNo||'').trim(),parentPhone:String(b.parentPhone||'').trim(),classTeacherComment:'',comments:{},active:true,createdAt:nowIso()};db.pupils.push(pupil);return{status:201,body:{pupil,state:stateForUser(db,user,workspaceKey)}};
   }
@@ -294,4 +325,4 @@ function serveStatic(pathname,res){let rel=decodeURIComponent(pathname||'/');if(
 
 const server=http.createServer(async(req,res)=>{const urlObj=new URL(req.url,`http://${req.headers.host||'localhost'}`);try{if(urlObj.pathname.startsWith('/api/')){await api(req,res,urlObj);return;}if(!serveStatic(urlObj.pathname,res))sendError(res,404,'Not found');}catch(err){console.error(err);if(!res.headersSent)sendError(res,err.status||500,err.message||'Server error');else res.end();}});
 
-initStorage().then(()=>server.listen(PORT,HOST,()=>{console.log(`Reportform ZM V${APP_VERSION} running on http://${HOST}:${PORT}`);console.log(`Storage: ${storageMode} (separate browser workspaces; no DATABASE_URL required)`);console.log(`Online AI comments: ${OPENAI_API_KEY?'configured':'not configured (Smart Local fallback active)'}`);console.log('Account sign-in: disabled; each browser receives a separate private class workspace.');})).catch(err=>{console.error('Could not initialise storage:',err);process.exit(1);});
+initStorage().then(()=>server.listen(PORT,HOST,()=>{console.log(`EduSend V${APP_VERSION} running on http://${HOST}:${PORT}`);console.log(`Storage: ${storageMode} (separate browser workspaces; no DATABASE_URL required)`);console.log(`Online AI comments: ${OPENAI_API_KEY?'configured':'not configured (Smart Local fallback active)'}`);console.log('Account sign-in: disabled; each browser receives a separate private class workspace.');})).catch(err=>{console.error('Could not initialise storage:',err);process.exit(1);});

@@ -1,8 +1,8 @@
 {
   "name": "reportform-zm",
-  "version": "3.1.7",
+  "version": "3.1.8",
   "private": true,
-  "description": "Local-workspace class report app with one-year device protection, automatic recovery, recycle bin, CBC and OBC assessments",
+  "description": "EduSend class report app with one-year device protection, screenshot OCR import, automatic recovery, recycle bin, CBC and OBC assessments",
   "scripts": {
     "start": "node server.js"
   },
