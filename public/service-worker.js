@@ -1,4 +1,4 @@
-const CACHE = 'reportform-zm-v3-1-7';
+const CACHE = 'edusend-v3-1-8';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));

@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION='3.1.7';
+  const APP_VERSION='3.1.8';
   const app=document.getElementById('app');
   const state={me:null,page:'home',saveTimer:null,recoveryTimer:null,mirrorTimer:null,recoveryBusy:false,mirrorBusy:false};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
@@ -137,7 +137,7 @@
   function renderShell(){
     const d=state.me;
     const teacher=d?.class?.teacherName||d?.user?.name||'';
-    app.innerHTML=`<div class="shell"><header class="topbar"><div><div class="app-title">Reportform ZM</div><div class="subtle">${esc(d.class?.name||'My Class')}${teacher?` • ${esc(teacher)}`:''}</div></div></header><main id="content" class="content"></main><nav class="bottom-nav"><button data-nav="home">⌂<span>Home</span></button><button data-nav="pupils">👥<span>Pupils</span></button><button data-nav="results">✎<span>Results</span></button><button data-nav="reports">▤<span>Reports</span></button></nav></div>`;
+    app.innerHTML=`<div class="shell"><header class="topbar"><div><div class="app-title">EduSend</div><div class="subtle">${esc(d.class?.name||'My Class')}${teacher?` • ${esc(teacher)}`:''}</div></div></header><main id="content" class="content"></main><nav class="bottom-nav"><button data-nav="home">⌂<span>Home</span></button><button data-nav="pupils">👥<span>Pupils</span></button><button data-nav="results">✎<span>Results</span></button><button data-nav="reports">▤<span>Reports</span></button></nav></div>`;
     document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>navigate(b.dataset.nav));
   }
 
@@ -249,6 +249,101 @@
     return{firstName:parts.shift()||'',surname:parts.join(' ')};
   }
 
+
+  let tesseractLoader=null;
+  function loadTesseract(){
+    if(window.Tesseract)return Promise.resolve(window.Tesseract);
+    if(tesseractLoader)return tesseractLoader;
+    tesseractLoader=new Promise((resolve,reject)=>{
+      const script=document.createElement('script');
+      script.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+      script.async=true;
+      script.onload=()=>window.Tesseract?resolve(window.Tesseract):reject(new Error('Screenshot reader could not start'));
+      script.onerror=()=>reject(new Error('Could not load the screenshot reader. Check the internet connection and try again.'));
+      document.head.appendChild(script);
+    });
+    return tesseractLoader;
+  }
+  function ocrTokenClean(v){return String(v||'').replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9%.'’\-]+$/g,'').trim();}
+  function ocrSex(v){const x=String(v||'').replace(/[^A-Za-z]/g,'').toUpperCase();return x==='F'||x==='FEMALE'?'F':x==='M'||x==='MALE'?'M':'';}
+  function ocrMark(v){const x=String(v||'').trim().toUpperCase();if(/^(ABS|ABSENT|A)$/.test(x))return'ABSENT';const n=Number(x.replace('%',''));return Number.isFinite(n)&&n>=0&&n<=100?n:null;}
+  function parseScreenshotText(text,mode='NAMES'){
+    const subjects=state.me?.subjects||[],subjectWords=subjects.map(s=>String(s.name||'').toLowerCase()).filter(Boolean),rows=[];
+    const seen=new Set();
+    for(let raw of String(text||'').split(/\r?\n/)){
+      raw=raw.replace(/[|\t]+/g,' ').replace(/\s+/g,' ').trim();
+      if(!raw||raw.length<3)continue;
+      const lower=raw.toLowerCase();
+      if((lower.includes('name')&&(lower.includes('sex')||lower.includes('gender'))) || lower.includes('total') || lower.includes('position') || lower.includes('average'))continue;
+      const subjectHits=subjectWords.filter(x=>x&&lower.includes(x)).length;if(subjectHits>=2)continue;
+      let tokens=raw.split(' ').map(ocrTokenClean).filter(Boolean);
+      if(tokens.length<2)continue;
+      if(/^\d{1,3}[.)-]?$/.test(tokens[0]) && /[A-Za-z]/.test(tokens[1]||''))tokens.shift();
+      let sex='',sexIndex=-1;
+      for(let i=2;i<tokens.length;i++){const sx=ocrSex(tokens[i]);if(sx){sex=sx;sexIndex=i;break;}}
+      let firstData=tokens.findIndex((t,i)=>i>0&&(ocrMark(t)!==null||ocrSex(t)));
+      if(firstData<0)firstData=tokens.length;
+      const nameEnd=sexIndex>=2?sexIndex:firstData;
+      let nameTokens=tokens.slice(0,nameEnd).filter(t=>/[A-Za-z]/.test(t) && !/^NO\.?$/i.test(t));
+      if(nameTokens.length<2)continue;
+      if(nameTokens.length>5)nameTokens=nameTokens.slice(0,5);
+      const firstName=nameTokens[0],surname=nameTokens.slice(1).join(' ');
+      if(!firstName||!surname)continue;
+      const key=(firstName+' '+surname).toLowerCase().replace(/[^a-z]/g,'');
+      if(!key||seen.has(key))continue;
+      const after=tokens.slice(Math.max(nameEnd+(sexIndex>=0?1:0),nameEnd));
+      let marks=[];
+      if(mode==='RESULTS'){
+        for(const t of after){const m=ocrMark(t);if(m!==null)marks.push(m);if(marks.length>=subjects.length)break;}
+      }
+      rows.push({firstName,surname,sex,marks,raw});seen.add(key);
+    }
+    return rows;
+  }
+  function openScreenshotImport(){
+    if(!(state.me?.subjects?.length)){toast('Add the class subjects first',true);navigate('subjects');return;}
+    let rows=[];
+    const subjects=state.me.subjects||[];
+    showModal(`<div class="modal-scroll screenshot-import-modal">${workflowBar('pupils')}<div class="page-head"><h2>📷 Upload Screenshot</h2><p>Use a screenshot of a pupil list or results sheet. EduSend will read it and let you correct everything before saving.</p></div>
+      <div class="screenshot-privacy">🔒 The screenshot is read on this device. EduSend only saves the pupil details and marks after you confirm the review.</div>
+      <div class="screenshot-controls">
+        <label>What is in the screenshot?<select id="screenshotMode"><option value="NAMES">Pupil names / class list</option><option value="RESULTS">Pupil names + results</option></select></label>
+        <label>Select screenshot(s)<input id="screenshotFiles" type="file" accept="image/*" multiple></label>
+      </div>
+      <div id="subjectOrderNote" class="assessment-note">For results screenshots, numeric marks are matched left-to-right to: <b>${subjects.map(s=>esc(s.name)).join(' → ')}</b>.</div>
+      <button id="scanScreenshots" type="button" class="btn primary big full">Read Screenshot</button>
+      <div id="ocrStatus" class="ocr-status"></div><div id="ocrReview"></div>
+    </div>`);
+    const review=byId('ocrReview'),status=byId('ocrStatus'),modeEl=byId('screenshotMode');
+    function renderReview(){
+      if(!rows.length){review.innerHTML='';return;}
+      const mode=modeEl.value;
+      const markHeads=mode==='RESULTS'?subjects.map(s=>`<th>${esc(s.name)}</th>`).join(''):'';
+      review.innerHTML=`<div class="ocr-review-head"><div><b>${rows.length} row${rows.length===1?'':'s'} detected</b><span>Check spellings, sex and marks before importing.</span></div></div><div class="ocr-table-wrap"><table class="ocr-table"><thead><tr><th>First name</th><th>Surname</th><th>Sex</th>${markHeads}<th></th></tr></thead><tbody>${rows.map((r,i)=>`<tr data-ocr-row="${i}"><td><input data-field="firstName" value="${esc(r.firstName)}"></td><td><input data-field="surname" value="${esc(r.surname)}"></td><td><select data-field="sex"><option value="">Choose</option><option value="F" ${r.sex==='F'?'selected':''}>Female</option><option value="M" ${r.sex==='M'?'selected':''}>Male</option></select></td>${mode==='RESULTS'?subjects.map((s,j)=>{const v=r.marks?.[j];return `<td><input class="ocr-mark" data-mark="${j}" value="${v==='ABSENT'?'ABS':(v??'')}" inputmode="decimal" placeholder="—"></td>`}).join(''):''}<td><button type="button" class="icon-btn danger-icon" data-remove-ocr="${i}" title="Remove row">×</button></td></tr>`).join('')}</tbody></table></div><div class="screenshot-import-actions"><button id="confirmScreenshotImport" type="button" class="btn primary big">Confirm Import</button><button id="rescanScreenshots" type="button" class="btn ghost">Choose another screenshot</button></div><p class="helper">Rows with an existing pupil name will be matched instead of creating a duplicate. Sex is required for any new pupil.</p>`;
+      review.querySelectorAll('[data-remove-ocr]').forEach(b=>b.onclick=()=>{rows.splice(Number(b.dataset.removeOcr),1);renderReview();});
+      byId('rescanScreenshots').onclick=()=>{rows=[];review.innerHTML='';byId('screenshotFiles').value='';status.textContent='';};
+      byId('confirmScreenshotImport').onclick=async()=>{
+        const trs=[...review.querySelectorAll('tbody tr')],payload=[];let invalid=false;
+        for(const tr of trs){const obj={firstName:tr.querySelector('[data-field="firstName"]').value.trim(),surname:tr.querySelector('[data-field="surname"]').value.trim(),sex:tr.querySelector('[data-field="sex"]').value,marks:[]};
+          if(!obj.firstName||!obj.surname){invalid=true;tr.classList.add('ocr-row-error');continue;}
+          if(modeEl.value==='RESULTS'){for(const input of tr.querySelectorAll('[data-mark]')){const raw=input.value.trim();if(!raw){obj.marks.push(null);continue;}if(/^(ABS|ABSENT|A)$/i.test(raw)){obj.marks.push('ABSENT');continue;}const n=Number(raw);if(!Number.isFinite(n)||n<0||n>100){invalid=true;input.classList.add('input-error');obj.marks.push(null);}else obj.marks.push(n);}}
+          payload.push(obj);
+        }
+        if(invalid){toast('Correct the highlighted names or marks before importing',true);return;}
+        const btn=byId('confirmScreenshotImport');btn.disabled=true;btn.textContent='Importing…';
+        try{const r=await api('/api/screenshot-import',{method:'POST',body:{mode:modeEl.value,rows:payload}});state.me=r.state;closeModal();toast(`Imported ${r.created||0} new pupil${r.created===1?'':'s'}${r.matched?` • matched ${r.matched} existing`:''}${r.marksSaved?` • ${r.marksSaved} marks`:''}`);await navigate('pupils');}catch(err){toast(err.message,true);btn.disabled=false;btn.textContent='Confirm Import';}
+      };
+    }
+    modeEl.onchange=()=>{rows=[];review.innerHTML='';status.textContent='';};
+    byId('scanScreenshots').onclick=async()=>{
+      const files=[...(byId('screenshotFiles').files||[])];if(!files.length){toast('Choose at least one screenshot',true);return;}
+      const btn=byId('scanScreenshots');btn.disabled=true;rows=[];review.innerHTML='';
+      try{const T=await loadTesseract();let combined=[];for(let i=0;i<files.length;i++){status.innerHTML=`<b>Reading screenshot ${i+1} of ${files.length}…</b><div class="ocr-progress"><span style="width:${Math.round((i/files.length)*100)}%"></span></div>`;const result=await T.recognize(files[i],'eng',{logger:m=>{if(m.status==='recognizing text'&&Number.isFinite(m.progress)){const pct=Math.round(((i+m.progress)/files.length)*100);status.innerHTML=`<b>Reading screenshot ${i+1} of ${files.length}… ${Math.round(m.progress*100)}%</b><div class="ocr-progress"><span style="width:${pct}%"></span></div>`;}}});combined=combined.concat(parseScreenshotText(result?.data?.text||'',modeEl.value));}
+        const uniq=new Map();for(const r of combined){const k=(r.firstName+' '+r.surname).toLowerCase().replace(/[^a-z]/g,'');if(k&&!uniq.has(k))uniq.set(k,r);}rows=[...uniq.values()];status.innerHTML=rows.length?`<span class="ocr-success">✓ Screenshot read. Review the detected rows below.</span>`:`<span class="ocr-warning">No pupil rows were confidently detected. Try a clearer, tightly cropped screenshot.</span>`;renderReview();
+      }catch(err){console.error(err);status.innerHTML=`<span class="ocr-warning">${esc(err.message||'Could not read the screenshot')}</span>`;}finally{btn.disabled=false;btn.textContent='Read Screenshot';}
+    };
+  }
+
   function pupilFormHtml(p={}){
     const n=splitStoredName(p);
     return `<form id="singlePupilForm" class="stack pupil-form">
@@ -326,9 +421,10 @@
       <div class="pupil-name-block"><b>${esc(n.firstName)} ${esc(n.surname)}</b><span>${esc(sex)} • ${m.summary.completedCount}/${m.summary.total} subjects checked • ${m.summary.sat} sat ${m.summary.complete?'• Complete':''}</span><div class="mini-pupil-actions"><button class="mini-result-btn" type="button" data-enter-results="${p.id}">✎ ${m.summary.complete?'Review Results':'Continue Results'}</button><button class="mini-report-btn" type="button" data-view-report="${p.id}">▤ Report</button></div></div>
       <div class="pupil-row-actions"><button class="icon-btn" type="button" data-edit-pupil="${p.id}" title="Edit pupil">✎</button><button class="icon-btn danger-icon" type="button" data-delete-pupil="${p.id}" title="Remove pupil">×</button></div>
     </article>`}).join(''):`<div class="empty-pupils"><div class="empty-plus">＋</div><h3>No pupils added yet</h3><p>Tap <b>+ Add Pupil</b>. After you save the pupil, the app will immediately ask for results one subject at a time.</p></div>`;
-    c.innerHTML=`${workflowBar('pupils')}<div class="page-head row-head pupils-head"><div><h2>Pupils & Results</h2><p>${esc(d.class?.name||'Your class')} • ${pupils.length} ${pupils.length===1?'pupil':'pupils'} • ${esc(assessmentLabel(d))}</p></div><button id="addPupil" class="btn primary add-pupil-btn" type="button"><span class="plus-symbol">＋</span> Add Pupil</button></div>
+    c.innerHTML=`${workflowBar('pupils')}<div class="page-head row-head pupils-head"><div><h2>Pupils & Results</h2><p>${esc(d.class?.name||'Your class')} • ${pupils.length} ${pupils.length===1?'pupil':'pupils'} • ${esc(assessmentLabel(d))}</p></div><div class="pupil-head-actions"><button id="uploadScreenshot" class="btn ghost screenshot-btn" type="button">📷 Upload Screenshot</button><button id="addPupil" class="btn primary add-pupil-btn" type="button"><span class="plus-symbol">＋</span> Add Pupil</button></div></div>
+      <div class="screenshot-tip"><b>Have a class list or results screenshot?</b> Upload it and review the detected names/marks instead of typing everything manually.</div>
       <div class="pupil-list">${list}</div>${pupils.length?'<button id="addAnotherPupil" class="btn primary full add-another" type="button">＋ Add another pupil</button>':''}${pupils.length?'<button id="goReports" class="btn ghost full" type="button">Continue to Reports →</button>':''}`;
-    byId('addPupil').onclick=()=>openPupilForm();if(byId('addAnotherPupil'))byId('addAnotherPupil').onclick=()=>openPupilForm();if(byId('goReports'))byId('goReports').onclick=()=>navigate('reports');
+    byId('uploadScreenshot').onclick=openScreenshotImport;byId('addPupil').onclick=()=>openPupilForm();if(byId('addAnotherPupil'))byId('addAnotherPupil').onclick=()=>openPupilForm();if(byId('goReports'))byId('goReports').onclick=()=>navigate('reports');
     c.querySelectorAll('[data-enter-results]').forEach(b=>b.onclick=()=>openGuidedResults(b.dataset.enterResults,firstMissingSubjectIndex(b.dataset.enterResults)));
     c.querySelectorAll('[data-view-report]').forEach(b=>b.onclick=async()=>{await navigate('reports');previewReport(b.dataset.viewReport);});
     c.querySelectorAll('[data-edit-pupil]').forEach(b=>b.onclick=()=>openPupilForm(pupils.find(p=>p.id===b.dataset.editPupil)));
@@ -438,7 +534,8 @@
     const d=state.me;if(!setupComplete()){c.innerHTML='<div class="notice">Add at least one subject and at least one pupil first.</div>';return;}
     const heads=d.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('');
     const rows=d.pupils.map((p,i)=>`<tr><th class="pupil-cell"><span>${i+1}. ${esc(p.name)}</span><small>${esc(p.examNo||'')}</small></th>${d.subjects.map(s=>{const v=d.marks?.[p.id]?.[s.id],abs=v==='ABSENT',val=abs?'':(v??'');return `<td><input class="mark-box" data-pupil="${p.id}" data-subject="${s.id}" data-status="${abs?'ABSENT':''}" type="number" min="0" max="100" step="0.1" value="${val}" placeholder="${abs?'ABS':'—'}" title="${abs?'Marked absent':'Enter mark'}"></td>`}).join('')}</tr>`).join('');
-    c.innerHTML=`<div class="page-head row-head"><div><h2>Results Grid</h2><p>${esc(assessmentLabel(d))} • ${esc(d.class?.term||'Term 1')} ${esc(d.class?.academicYear||'')}</p></div><div id="saveState" class="save-state">✓ Saved</div></div><div class="marks-wrap"><table class="marks-table"><thead><tr><th class="pupil-cell">Pupil</th>${heads}</tr></thead><tbody>${rows}</tbody></table></div><p class="helper">Blank means no mark entered. Marks save automatically.</p>`;
+    c.innerHTML=`<div class="page-head row-head"><div><h2>Results Grid</h2><p>${esc(assessmentLabel(d))} • ${esc(d.class?.term||'Term 1')} ${esc(d.class?.academicYear||'')}</p></div><div class="results-head-actions"><button id="uploadResultsScreenshot" class="btn ghost screenshot-btn" type="button">📷 Upload Screenshot</button><div id="saveState" class="save-state">✓ Saved</div></div></div><div class="marks-wrap"><table class="marks-table"><thead><tr><th class="pupil-cell">Pupil</th>${heads}</tr></thead><tbody>${rows}</tbody></table></div><p class="helper">Blank means no mark entered. Marks save automatically. You can also upload a results screenshot and review detected marks before importing.</p>`;
+    byId('uploadResultsScreenshot').onclick=openScreenshotImport;
     c.querySelectorAll('.mark-box').forEach(input=>input.addEventListener('input',e=>{e.currentTarget.dataset.status='';scheduleSave();}));
   }
 
@@ -520,7 +617,7 @@
       <div class="old-summary">${!m.summary.complete?`RESULT STATUS: <b>INCOMPLETE (${m.summary.completedCount}/${m.summary.total} subjects checked)</b>`:d.class.gradingSystem==='CBC'?`OVERALL AVERAGE: <b>${m.summary.average}%</b><span>SAT: <b>${m.summary.sat}/${m.summary.total}</b> • CBC AVG GRADE: <b>Grade ${m.summary.averageGrade} — ${esc(remarkCBC(m.summary.averageGrade))}</b></span>`:m.summary.best6Count>=6?`TOTAL MARKS (Best 6): <b>${m.summary.best6}/600</b><span>SAT: <b>${m.summary.sat}/${m.summary.total}</b> • POINTS: <b>${m.summary.points}</b> • DIVISION: <b>${esc(m.summary.division)}</b></span>`:`TOTAL MARKS (${m.summary.best6Count} subjects): <b>${m.summary.best6}</b><span>GRADE POINTS: <b>${m.summary.points}</b> • DIVISION: <b>Pending until 6 subjects</b></span>`}</div>
       <div class="old-comment"><b>Class Teacher's Comment:</b><p>${esc(comment)}</p></div>
       <div class="old-signatures"><div><span>${esc(d.class?.teacherName||d.user?.name||'')}</span><i></i><small>Class Teacher${d.class?.teacherPhone?` • ${esc(d.class.teacherPhone)}`:''}</small></div><div><span>&nbsp;</span><i></i><small>Date</small></div></div>
-      <div class="report-footer">Reportform ZM • ${esc(d.class.gradingSystem)} grading</div>
+      <div class="report-footer">EduSend • ${esc(d.class.gradingSystem)} grading</div>
     </div>`;
   }
 
@@ -565,7 +662,7 @@
     else if(m.summary.best6Count>=6){doc.text(`TOTAL MARKS (Best 6): ${m.summary.best6} / 600   SAT: ${m.summary.sat}/${m.summary.total}`,12,y);const rightText=`POINTS: ${m.summary.points}   DIVISION: ${m.summary.division}`;doc.text(rightText,198-doc.getTextWidth(rightText),y);}else{doc.text(`TOTAL MARKS (${m.summary.best6Count} subjects): ${m.summary.best6}`,12,y);const rightText=`POINTS: ${m.summary.points}   DIVISION: PENDING`;doc.text(rightText,198-doc.getTextWidth(rightText),y);}
     y+=7;doc.setDrawColor(180);doc.line(12,y,198,y);y+=6;doc.setFont('helvetica','bold');doc.setFontSize(9);doc.text("Class Teacher's Comment:",12,y);y+=5;doc.setFont('helvetica','normal');doc.setFontSize(8.6);const lines=doc.splitTextToSize(teacherComment(d,p,m),186);doc.text(lines.slice(0,13),12,y);y+=Math.min(lines.length,13)*4+5;
     doc.setFontSize(8);doc.text(String(d.class?.teacherName||d.user?.name||''),15,Math.min(y,257));if(d.class?.teacherPhone){doc.setFontSize(7.2);doc.setTextColor(80);doc.text(String(d.class.teacherPhone),15,Math.min(y+3.5,260));doc.setTextColor(0);}const sy=Math.min(y+6,263);doc.setDrawColor(0);doc.line(15,sy,78,sy);doc.line(120,sy,180,sy);doc.text('Class Teacher',15,sy+4);doc.text('Date',120,sy+4);
-    doc.setFontSize(7.5);doc.setTextColor(80);doc.text(`Reportform ZM • ${d.class.gradingSystem} • ${pageNo}`,198,280,{align:'right'});
+    doc.setFontSize(7.5);doc.setTextColor(80);doc.text(`EduSend • ${d.class.gradingSystem} • ${pageNo}`,198,280,{align:'right'});
   }
 
   async function buildDoc(pupils){const JsPDF=await ensurePdf(),doc=new JsPDF({unit:'mm',format:'a4'});pupils.forEach((p,i)=>{if(i)doc.addPage();drawPdf(doc,state.me,p,i+1);});return doc;}
@@ -574,5 +671,5 @@
   function normalizeWhatsAppPhone(value){let x=String(value||'').replace(/\D/g,'');if(x.startsWith('00'))x=x.slice(2);if(x.startsWith('0'))x='260'+x.slice(1);return x;}
   async function shareOne(id){const p=state.me.pupils.find(x=>x.id===id);if(!p)return;try{const doc=await buildDoc([p]),blob=doc.output('blob'),file=new File([blob],`${state.me.class.name}_${p.name.replace(/\s+/g,'_')}_${state.me.assessment.name.replace(/\s+/g,'_')}_${state.me.class.academicYear||''}.pdf`,{type:'application/pdf'}),message=`${state.me.class.schoolName} — ${state.me.assessment.name}, ${state.me.class.term||''} ${state.me.class.academicYear||''} report for ${p.name}.${schoolCalendarLabel(state.me)?` ${schoolCalendarLabel(state.me)}.`:''}`;if(navigator.share&&(!navigator.canShare||navigator.canShare({files:[file]}))){await navigator.share({files:[file],title:`${p.name} - Pupil Report`,text:message});return;}doc.save(file.name);const phone=normalizeWhatsAppPhone(p.parentPhone),url=`https://wa.me/${phone}?text=${encodeURIComponent(message+' The PDF has been downloaded; please attach it to this WhatsApp message.')}`;const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';document.body.appendChild(link);link.click();link.remove();toast('PDF downloaded. WhatsApp opened — attach the downloaded report.');}catch(e){if(e.name!=='AbortError')toast(e.message,true);}}
 
-  bootstrap().catch(err=>{app.innerHTML=`<div class="auth-page"><div class="auth-card"><h2>Reportform ZM could not open</h2><p>${esc(err.message||err)}</p><button class="btn primary full" onclick="location.reload()">Try again</button></div></div>`;});
+  bootstrap().catch(err=>{app.innerHTML=`<div class="auth-page"><div class="auth-card"><h2>EduSend could not open</h2><p>${esc(err.message||err)}</p><button class="btn primary full" onclick="location.reload()">Try again</button></div></div>`;});
 })();
