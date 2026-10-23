@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION='3.1.10';
+  const APP_VERSION='3.1.11';
   const app=document.getElementById('app');
   const state={me:null,page:'home',saveTimer:null,recoveryTimer:null,mirrorTimer:null,recoveryBusy:false,mirrorBusy:false};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
@@ -250,7 +250,7 @@
   }
 
 
-  let tesseractLoader=null,pdfLoader=null,xlsxLoader=null,mammothLoader=null,zipLoader=null;
+  let tesseractLoader=null,pdfLoader=null,xlsxLoader=null,mammothLoader=null,zipLoader=null,heicLoader=null;
   let activeOcrWorker=null,activeOcrWorkerPromise=null,activeOcrProgress=null;
   function loadScriptOnce(test,url,slotName,errorMessage){
     if(test())return Promise.resolve(test());
@@ -314,6 +314,24 @@
     ],'__edusendZip','Could not load the document reader. Check the internet connection and try again.').catch(err=>{zipLoader=null;throw err;});
     return zipLoader;
   }
+  function loadHeic2Any(){
+    if(window.heic2any)return Promise.resolve(window.heic2any);
+    if(heicLoader)return heicLoader;
+    heicLoader=loadScriptFallback(()=>window.heic2any,[
+      'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js',
+      'https://unpkg.com/heic2any@0.0.4/dist/heic2any.min.js'
+    ],'__edusendHeic','Could not load the HEIC/HEIF image converter. Check the internet connection and try again.').catch(err=>{heicLoader=null;throw err;});
+    return heicLoader;
+  }
+  async function imageSourceForOcr(file){
+    const ext=extOf(file),type=String(file?.type||'').toLowerCase();
+    if(ext==='.heic'||ext==='.heif'||type.includes('heic')||type.includes('heif')){
+      const convert=await loadHeic2Any();
+      const out=await convert({blob:file,toType:'image/jpeg',quality:0.92});
+      return Array.isArray(out)?out[0]:out;
+    }
+    return file;
+  }
   async function ensureOcrWorker(onProgress){
     activeOcrProgress=onProgress||null;if(activeOcrWorker)return activeOcrWorker;if(activeOcrWorkerPromise)return activeOcrWorkerPromise;
     activeOcrWorkerPromise=(async()=>{
@@ -368,7 +386,55 @@
   function extOf(file){const n=String(file?.name||'').toLowerCase();const i=n.lastIndexOf('.');return i>=0?n.slice(i):'';}
   function xmlText(xml){try{return new DOMParser().parseFromString(xml,'application/xml').documentElement?.textContent||'';}catch{return String(xml||'').replace(/<[^>]+>/g,' ');}}
   function stripRtf(t){return String(t||'').replace(/\\'[0-9a-fA-F]{2}/g,' ').replace(/\\[a-zA-Z]+-?\d* ?/g,' ').replace(/[{}]/g,' ').replace(/\s+/g,' ');}
-  async function imageToText(source,onProgress){const worker=await ensureOcrWorker(onProgress);activeOcrProgress=onProgress||null;const result=await worker.recognize(source);return result?.data?.text||'';}
+  async function imageOcrResult(source,onProgress){const worker=await ensureOcrWorker(onProgress);activeOcrProgress=onProgress||null;return worker.recognize(source);}
+  async function imageToText(source,onProgress){const result=await imageOcrResult(source,onProgress);return result?.data?.text||'';}
+  function ocrBox(word){const b=word?.bbox||word?.boundingBox||{};const x0=Number(b.x0??b.left??0),y0=Number(b.y0??b.top??0),x1=Number(b.x1??b.right??x0),y1=Number(b.y1??b.bottom??y0);return{x0,y0,x1,y1,cx:(x0+x1)/2,cy:(y0+y1)/2};}
+  function ocrWordText(word){return String(word?.text||word?.symbols?.map?.(x=>x.text).join('')||'').trim();}
+  function cleanPrintedName(value){
+    const parts=String(value||'').replace(/[^A-Za-z'’\- ]+/g,' ').split(/\s+/).filter(Boolean).filter(x=>x.length>1);
+    return parts.map(x=>x.toLowerCase().replace(/(^|[-'’])([a-z])/g,(m,p,c)=>p+c.toUpperCase())).join(' ');
+  }
+  function median(nums){const a=nums.filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return 0;const m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2;}
+  function tablePupilRowsFromWords(words){
+    const W=(Array.isArray(words)?words:[]).map(w=>({raw:w,text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.box.x1>w.box.x0&&w.box.y1>w.box.y0&&w.conf>=20);
+    if(!W.length)return[];
+    const norm=t=>String(t||'').toUpperCase().replace(/[^A-Z]/g,'');
+    const surnameHead=W.find(w=>norm(w.text)==='SURNAME');
+    let firstHead=W.find(w=>['FIRSTNAME','FIRSTNAMES','FORENAME'].includes(norm(w.text)));
+    if(!firstHead){const fw=W.find(w=>norm(w.text)==='FIRST');if(fw){const near=W.find(w=>norm(w.text)==='NAME'&&Math.abs(w.box.cy-fw.box.cy)<Math.max(12,(fw.box.y1-fw.box.y0)*1.4)&&w.box.cx>fw.box.cx);if(near)firstHead={text:'FIRSTNAME',box:{...fw.box,cx:(fw.box.cx+near.box.cx)/2,cy:(fw.box.cy+near.box.cy)/2,x0:fw.box.x0,x1:near.box.x1,y0:Math.min(fw.box.y0,near.box.y0),y1:Math.max(fw.box.y1,near.box.y1)},conf:Math.min(fw.conf,near.conf)};}}
+    const sexHead=W.find(w=>['SEX','GENDER'].includes(norm(w.text)));
+    if(!surnameHead||!firstHead||!sexHead)return[];
+    const headerY=median([surnameHead.box.cy,firstHead.box.cy,sexHead.box.cy]);
+    const surnameX=surnameHead.box.cx,firstX=firstHead.box.cx,sexX=sexHead.box.cx;
+    const rightHeaders=W.filter(w=>w.box.cy<headerY+Math.max(30,(sexHead.box.y1-sexHead.box.y0)*2.5)&&w.box.cx>sexX).sort((a,b)=>a.box.cx-b.box.cx);
+    const nextHead=rightHeaders.find(w=>/^[A-Z]{2,8}$/.test(norm(w.text)));
+    const gap=Math.max(25,firstX-surnameX,sexX-firstX);
+    const surnameLeft=surnameX-gap*0.75,surnameRight=(surnameX+firstX)/2;
+    const firstLeft=surnameRight,firstRight=(firstX+sexX)/2;
+    const sexLeft=firstRight,sexRight=nextHead?(sexX+nextHead.box.cx)/2:sexX+gap*0.65;
+    const serials=W.filter(w=>w.box.cy>headerY&&w.box.cx<surnameLeft&&/^\d{1,3}[.)]?$/.test(w.text.replace(/\s/g,''))).map(w=>({n:Number(w.text.replace(/\D/g,'')),y:w.box.cy,box:w.box})).filter(x=>x.n>=1&&x.n<=120).sort((a,b)=>a.y-b.y);
+    const anchors=[];for(const x of serials){if(!anchors.length||Math.abs(x.y-anchors[anchors.length-1].y)>5)anchors.push(x);}
+    if(anchors.length<2)return[];
+    const gaps=anchors.slice(1).map((x,i)=>x.y-anchors[i].y).filter(x=>x>4),rowGap=median(gaps)||28;
+    const rows=[];
+    for(let i=0;i<anchors.length;i++){
+      const a=anchors[i],top=i?((anchors[i-1].y+a.y)/2):(a.y-rowGap*0.48),bottom=i<anchors.length-1?((a.y+anchors[i+1].y)/2):(a.y+rowGap*0.48);
+      const inRow=W.filter(w=>w.box.cy>=top&&w.box.cy<bottom);
+      const cell=(lo,hi)=>inRow.filter(w=>w.box.cx>=lo&&w.box.cx<hi).sort((x,y)=>x.box.x0-y.box.x0).map(w=>w.text).join(' ');
+      const surname=cleanPrintedName(cell(surnameLeft,surnameRight)),firstName=cleanPrintedName(cell(firstLeft,firstRight));
+      const sexTokens=inRow.filter(w=>w.box.cx>=sexLeft&&w.box.cx<sexRight).sort((x,y)=>Math.abs(x.box.cx-sexX)-Math.abs(y.box.cx-sexX));
+      let sex='';for(const w of sexTokens){sex=ocrSex(w.text);if(sex)break;}
+      if(firstName&&surname)rows.push({firstName,surname,sex,marks:[],serial:a.n,source:'table'});
+    }
+    return rows;
+  }
+  async function imageToPupilRows(file,onStatus){
+    const source=await imageSourceForOcr(file);
+    const result=await imageOcrResult(source,p=>onStatus&&onStatus(`Reading pupil table ${file.name}…`,p));
+    const structured=tablePupilRowsFromWords(result?.data?.words||[]);
+    if(structured.length)return structured;
+    return parseScreenshotText(result?.data?.text||'','NAMES');
+  }
   async function pdfToText(file,onStatus){
     const P=await loadPdfJs(),buf=await file.arrayBuffer(),pdf=await P.getDocument({data:buf}).promise;let all=[];
     for(let i=1;i<=pdf.numPages;i++){
@@ -384,7 +450,7 @@
   async function zippedDocumentToText(file,kind){const Z=await loadJSZip(),zip=await Z.loadAsync(await file.arrayBuffer()),names=Object.keys(zip.files).filter(n=>!zip.files[n].dir);let chosen=[];if(kind==='pptx')chosen=names.filter(n=>/^ppt\/slides\/slide\d+\.xml$/i.test(n)).sort((a,b)=>(Number(a.match(/slide(\d+)/i)?.[1]||0)-Number(b.match(/slide(\d+)/i)?.[1]||0)));else if(kind==='odt')chosen=names.filter(n=>/content\.xml$/i.test(n));else if(kind==='epub')chosen=names.filter(n=>/\.(xhtml|html|htm)$/i.test(n));const out=[];for(const n of chosen){out.push(xmlText(await zip.files[n].async('text')));}return out.join('\n');}
   async function fileToText(file,onStatus){
     const ext=extOf(file),type=String(file.type||'').toLowerCase();
-    if(type.startsWith('image/')||['.jpg','.jpeg','.png','.webp','.bmp','.gif','.tif','.tiff'].includes(ext)){onStatus&&onStatus(`Reading image ${file.name}…`,0);return imageToText(file,p=>onStatus&&onStatus(`Reading image ${file.name}…`,p));}
+    if(type.startsWith('image/')||['.jpg','.jpeg','.png','.webp','.bmp','.gif','.tif','.tiff','.heic','.heif'].includes(ext)){onStatus&&onStatus(`Reading image ${file.name}…`,0);const src=await imageSourceForOcr(file);return imageToText(src,p=>onStatus&&onStatus(`Reading image ${file.name}…`,p));}
     if(ext==='.pdf'||type==='application/pdf')return pdfToText(file,onStatus);
     if(['.xlsx','.xls','.xlsm','.xlsb','.csv','.tsv','.ods'].includes(ext)||type.includes('spreadsheet')||type.includes('excel')||type==='text/csv')return spreadsheetToText(file);
     if(ext==='.docx'||type.includes('wordprocessingml'))return docxToText(file);
@@ -403,11 +469,11 @@
     showModal(`<div class="modal-scroll screenshot-import-modal">${workflowBar('pupils')}<div class="page-head"><h2>📎 Upload Results File</h2><p>Upload a picture, screenshot or school document. EduSend will read it and let you correct everything before saving.</p></div>
       <div class="screenshot-privacy">🔒 Files are read on this device. EduSend only saves pupil details and marks after you confirm the review.</div>
       <div class="screenshot-controls">
-        <label>What is in the file?<select id="screenshotMode"><option value="NAMES">Pupil names / class list</option><option value="RESULTS">Pupil names + results</option></select></label>
-        <label>Select file(s)<input id="screenshotFiles" type="file" accept="image/*,.pdf,.xlsx,.xls,.xlsm,.xlsb,.csv,.tsv,.ods,.docx,.doc,.pptx,.ppt,.odt,.epub,.txt,.rtf,.md,.json,.xml,.html,.htm" multiple></label>
+        <label>What is in the file?<select id="screenshotMode"><option value="NAMES">Pupil names + sex (recommended first)</option><option value="RESULTS">Pupil names + results</option></select></label>
+        <label>Select file(s)<input id="screenshotFiles" type="file" accept="image/*,.heic,.heif,.pdf,.xlsx,.xls,.xlsm,.xlsb,.csv,.tsv,.ods,.docx,.doc,.pptx,.ppt,.odt,.epub,.txt,.rtf,.md,.json,.xml,.html,.htm" multiple></label>
       </div>
-      <div class="file-format-note"><b>Accepted:</b> images/screenshots, PDF, Excel, CSV, Word DOCX, PowerPoint PPTX, ODT, EPUB and text files. Old DOC/PPT files should first be exported to PDF or DOCX/PPTX.</div>
-      <div id="subjectOrderNote" class="assessment-note">For result files, numeric marks are matched left-to-right to: <b>${subjects.map(s=>esc(s.name)).join(' → ')}</b>.</div>
+      <div class="file-format-note"><b>Recommended:</b> import the pupil list first. EduSend reads <b>SURNAME → FIRSTNAME → SEX</b> row by row and uses <b>M = Male</b>, <b>F = Female</b>. Images/HEIC, PDF, Excel, CSV, DOCX and other common school files are accepted.</div>
+      <div id="subjectOrderNote" class="assessment-note">For <b>Pupil names + sex</b>, EduSend ignores the marks area and updates/adds the whole pupil list. For result files, marks are matched to: <b>${subjects.map(s=>esc(s.name)).join(' → ')}</b>.</div>
       <button id="scanScreenshots" type="button" class="btn primary big full">Read File</button>
       <div id="ocrStatus" class="ocr-status"></div><div id="ocrReview"></div>
     </div>`);
@@ -416,7 +482,7 @@
       if(!rows.length){review.innerHTML='';return;}
       const mode=modeEl.value;
       const markHeads=mode==='RESULTS'?subjects.map(s=>`<th>${esc(s.name)}</th>`).join(''):'';
-      review.innerHTML=`<div class="ocr-review-head"><div><b>${rows.length} row${rows.length===1?'':'s'} detected</b><span>Check spellings, sex and marks before importing.</span></div></div><div class="ocr-table-wrap"><table class="ocr-table"><thead><tr><th>First name</th><th>Surname</th><th>Sex</th>${markHeads}<th></th></tr></thead><tbody>${rows.map((r,i)=>`<tr data-ocr-row="${i}"><td><input data-field="firstName" value="${esc(r.firstName)}"></td><td><input data-field="surname" value="${esc(r.surname)}"></td><td><select data-field="sex"><option value="">Choose</option><option value="F" ${r.sex==='F'?'selected':''}>Female</option><option value="M" ${r.sex==='M'?'selected':''}>Male</option></select></td>${mode==='RESULTS'?subjects.map((s,j)=>{const v=r.marks?.[j];return `<td><input class="ocr-mark" data-mark="${j}" value="${v==='ABSENT'?'ABS':(v??'')}" inputmode="decimal" placeholder="—"></td>`}).join(''):''}<td><button type="button" class="icon-btn danger-icon" data-remove-ocr="${i}" title="Remove row">×</button></td></tr>`).join('')}</tbody></table></div><div class="screenshot-import-actions"><button id="confirmScreenshotImport" type="button" class="btn primary big">Confirm Import</button><button id="rescanScreenshots" type="button" class="btn ghost">Choose another file</button></div><p class="helper">Rows with an existing pupil name will be matched instead of creating a duplicate. Sex is required for any new pupil.</p>`;
+      review.innerHTML=`<div class="ocr-review-head"><div><b>${rows.length} row${rows.length===1?'':'s'} detected</b><span>${mode==='NAMES'?'Check first name, surname and sex before updating the class list.':'Check spellings, sex and marks before importing.'}</span></div></div><div class="ocr-table-wrap"><table class="ocr-table"><thead><tr><th>First name</th><th>Surname</th><th>Sex</th>${markHeads}<th></th></tr></thead><tbody>${rows.map((r,i)=>`<tr data-ocr-row="${i}"><td><input data-field="firstName" value="${esc(r.firstName)}"></td><td><input data-field="surname" value="${esc(r.surname)}"></td><td><select data-field="sex"><option value="">Choose</option><option value="F" ${r.sex==='F'?'selected':''}>Female</option><option value="M" ${r.sex==='M'?'selected':''}>Male</option></select></td>${mode==='RESULTS'?subjects.map((s,j)=>{const v=r.marks?.[j];return `<td><input class="ocr-mark" data-mark="${j}" value="${v==='ABSENT'?'ABS':(v??'')}" inputmode="decimal" placeholder="—"></td>`}).join(''):''}<td><button type="button" class="icon-btn danger-icon" data-remove-ocr="${i}" title="Remove row">×</button></td></tr>`).join('')}</tbody></table></div><div class="screenshot-import-actions"><button id="confirmScreenshotImport" type="button" class="btn primary big">Confirm Import</button><button id="rescanScreenshots" type="button" class="btn ghost">Choose another file</button></div><p class="helper">Existing pupils are matched even if first name and surname were previously reversed; their name and sex will be corrected. New pupils are added. Sex is required for every new pupil.</p>`;
       review.querySelectorAll('[data-remove-ocr]').forEach(b=>b.onclick=()=>{rows.splice(Number(b.dataset.removeOcr),1);renderReview();});
       byId('rescanScreenshots').onclick=()=>{rows=[];review.innerHTML='';byId('screenshotFiles').value='';status.textContent='';};
       byId('confirmScreenshotImport').onclick=async()=>{
@@ -438,11 +504,16 @@
       try{
         for(let i=0;i<files.length;i++){
           const f=files[i];status.innerHTML=`<b>Reading ${esc(f.name)} (${i+1} of ${files.length})…</b><div class="ocr-progress"><span style="width:${Math.round((i/files.length)*100)}%"></span></div>`;
-          try{const text=await fileToText(f,(msg,p)=>{const pct=Math.round(((i+(Number.isFinite(p)?p:0))/files.length)*100);status.innerHTML=`<b>${esc(msg)}</b><div class="ocr-progress"><span style="width:${pct}%"></span></div>`;});combined=combined.concat(parseScreenshotText(text,modeEl.value));}catch(err){console.error(err);errors.push(`${f.name}: ${err.message||'Could not read this file'}`);}
+          try{
+            const reportProgress=(msg,p)=>{const pct=Math.round(((i+(Number.isFinite(p)?p:0))/files.length)*100);status.innerHTML=`<b>${esc(msg)}</b><div class="ocr-progress"><span style="width:${pct}%"></span></div>`;};
+            const ext=extOf(f),type=String(f.type||'').toLowerCase(),isImage=type.startsWith('image/')||['.jpg','.jpeg','.png','.webp','.bmp','.gif','.tif','.tiff','.heic','.heif'].includes(ext);
+            if(modeEl.value==='NAMES'&&isImage)combined=combined.concat(await imageToPupilRows(f,reportProgress));
+            else{const text=await fileToText(f,reportProgress);combined=combined.concat(parseScreenshotText(text,modeEl.value));}
+          }catch(err){console.error(err);errors.push(`${f.name}: ${err.message||'Could not read this file'}`);}
         }
         const uniq=new Map();for(const r of combined){const k=(r.firstName+' '+r.surname).toLowerCase().replace(/[^a-z]/g,'');if(k&&!uniq.has(k))uniq.set(k,r);}rows=[...uniq.values()];
         const errorHtml=errors.length?`<div class="ocr-warning">${errors.map(esc).join('<br>')}</div>`:'';
-        status.innerHTML=(rows.length?`<span class="ocr-success">✓ File reading complete. Review the detected rows below.</span>`:`<span class="ocr-warning">No pupil rows were confidently detected. Check the file layout or try a clearer export/screenshot.</span>`)+errorHtml;renderReview();
+        status.innerHTML=(rows.length?`<span class="ocr-success">✓ Pupil rows detected. Review first name, surname and sex below before updating the class list.</span>`:`<span class="ocr-warning">No pupil rows were confidently detected. Check the file layout or try a clearer export/screenshot.</span>`)+errorHtml;renderReview();
       }catch(err){console.error(err);status.innerHTML=`<span class="ocr-warning">${esc(err.message||'Could not read the file')}</span>`;}finally{await releaseOcrWorker();btn.disabled=false;btn.textContent='Read File';}
     };
   }
