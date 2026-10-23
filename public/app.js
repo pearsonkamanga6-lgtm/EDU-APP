@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION='3.1.8';
+  const APP_VERSION='3.1.10';
   const app=document.getElementById('app');
   const state={me:null,page:'home',saveTimer:null,recoveryTimer:null,mirrorTimer:null,recoveryBusy:false,mirrorBusy:false};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
@@ -137,7 +137,7 @@
   function renderShell(){
     const d=state.me;
     const teacher=d?.class?.teacherName||d?.user?.name||'';
-    app.innerHTML=`<div class="shell"><header class="topbar"><div><div class="app-title">EduSend</div><div class="subtle">${esc(d.class?.name||'My Class')}${teacher?` • ${esc(teacher)}`:''}</div></div></header><main id="content" class="content"></main><nav class="bottom-nav"><button data-nav="home">⌂<span>Home</span></button><button data-nav="pupils">👥<span>Pupils</span></button><button data-nav="results">✎<span>Results</span></button><button data-nav="reports">▤<span>Reports</span></button></nav></div>`;
+    app.innerHTML=`<div class="shell"><header class="topbar"><div><div class="app-title-row"><div class="app-title">EduSend</div><span class="version-badge">v${APP_VERSION}</span></div><div class="subtle">${esc(d.class?.name||'My Class')}${teacher?` • ${esc(teacher)}`:''}</div></div></header><main id="content" class="content"></main><nav class="bottom-nav"><button data-nav="home">⌂<span>Home</span></button><button data-nav="pupils">👥<span>Pupils</span></button><button data-nav="results">✎<span>Results</span></button><button data-nav="reports">▤<span>Reports</span></button></nav></div>`;
     document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>navigate(b.dataset.nav));
   }
 
@@ -250,20 +250,85 @@
   }
 
 
-  let tesseractLoader=null;
+  let tesseractLoader=null,pdfLoader=null,xlsxLoader=null,mammothLoader=null,zipLoader=null;
+  let activeOcrWorker=null,activeOcrWorkerPromise=null,activeOcrProgress=null;
+  function loadScriptOnce(test,url,slotName,errorMessage){
+    if(test())return Promise.resolve(test());
+    if(window[slotName])return window[slotName];
+    window[slotName]=new Promise((resolve,reject)=>{
+      const script=document.createElement('script');script.src=url;script.async=true;script.crossOrigin='anonymous';
+      const fail=()=>{try{script.remove();}catch{}window[slotName]=null;reject(new Error(errorMessage));};
+      script.onload=()=>test()?resolve(test()):fail();script.onerror=fail;document.head.appendChild(script);
+    });
+    return window[slotName];
+  }
+  async function loadScriptFallback(test,urls,slotName,errorMessage){
+    if(test())return test();let last=null;
+    for(let i=0;i<urls.length;i++){
+      try{return await loadScriptOnce(test,urls[i],slotName,errorMessage);}catch(err){last=err;window[slotName]=null;}
+    }
+    throw last||new Error(errorMessage);
+  }
   function loadTesseract(){
     if(window.Tesseract)return Promise.resolve(window.Tesseract);
     if(tesseractLoader)return tesseractLoader;
-    tesseractLoader=new Promise((resolve,reject)=>{
-      const script=document.createElement('script');
-      script.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-      script.async=true;
-      script.onload=()=>window.Tesseract?resolve(window.Tesseract):reject(new Error('Screenshot reader could not start'));
-      script.onerror=()=>reject(new Error('Could not load the screenshot reader. Check the internet connection and try again.'));
-      document.head.appendChild(script);
-    });
+    tesseractLoader=loadScriptFallback(()=>window.Tesseract,[
+      'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js',
+      'https://unpkg.com/tesseract.js@5/dist/tesseract.min.js'
+    ],'__edusendTesseract','Could not load the image reader. Make sure the phone has internet access, then try again.').catch(err=>{tesseractLoader=null;throw err;});
     return tesseractLoader;
   }
+  function loadPdfJs(){
+    if(window.pdfjsLib)return Promise.resolve(window.pdfjsLib);
+    if(pdfLoader)return pdfLoader;
+    pdfLoader=loadScriptFallback(()=>window.pdfjsLib,[
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
+      'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js'
+    ],'__edusendPdf','Could not load the PDF reader. Check the internet connection and try again.').then(P=>{P.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';return P;}).catch(err=>{pdfLoader=null;throw err;});
+    return pdfLoader;
+  }
+  function loadXlsx(){
+    if(window.XLSX)return Promise.resolve(window.XLSX);
+    if(xlsxLoader)return xlsxLoader;
+    xlsxLoader=loadScriptFallback(()=>window.XLSX,[
+      'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js',
+      'https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js'
+    ],'__edusendXlsx','Could not load the spreadsheet reader. Check the internet connection and try again.').catch(err=>{xlsxLoader=null;throw err;});
+    return xlsxLoader;
+  }
+  function loadMammoth(){
+    if(window.mammoth)return Promise.resolve(window.mammoth);
+    if(mammothLoader)return mammothLoader;
+    mammothLoader=loadScriptFallback(()=>window.mammoth,[
+      'https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js',
+      'https://unpkg.com/mammoth@1.8.0/mammoth.browser.min.js'
+    ],'__edusendMammoth','Could not load the Word document reader. Check the internet connection and try again.').catch(err=>{mammothLoader=null;throw err;});
+    return mammothLoader;
+  }
+  function loadJSZip(){
+    if(window.JSZip)return Promise.resolve(window.JSZip);
+    if(zipLoader)return zipLoader;
+    zipLoader=loadScriptFallback(()=>window.JSZip,[
+      'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js',
+      'https://unpkg.com/jszip@3.10.1/dist/jszip.min.js'
+    ],'__edusendZip','Could not load the document reader. Check the internet connection and try again.').catch(err=>{zipLoader=null;throw err;});
+    return zipLoader;
+  }
+  async function ensureOcrWorker(onProgress){
+    activeOcrProgress=onProgress||null;if(activeOcrWorker)return activeOcrWorker;if(activeOcrWorkerPromise)return activeOcrWorkerPromise;
+    activeOcrWorkerPromise=(async()=>{
+      const T=await loadTesseract();const logger=m=>{if(m.status==='recognizing text'&&Number.isFinite(m.progress)&&activeOcrProgress)activeOcrProgress(m.progress);};
+      const configs=[
+        {workerPath:'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',corePath:'https://cdn.jsdelivr.net/npm/tesseract.js-core@5',langPath:'https://tessdata.projectnaptha.com/4.0.0',logger},
+        {workerPath:'https://unpkg.com/tesseract.js@5/dist/worker.min.js',corePath:'https://unpkg.com/tesseract.js-core@5',langPath:'https://tessdata.projectnaptha.com/4.0.0',logger}
+      ];
+      let last=null;
+      for(const options of configs){try{return await T.createWorker('eng',1,options);}catch(err){console.warn('OCR worker source failed',err);last=err;}}
+      throw new Error(`Image reader could not start${last?.message?`: ${last.message}`:''}`);
+    })();
+    try{activeOcrWorker=await activeOcrWorkerPromise;return activeOcrWorker;}finally{activeOcrWorkerPromise=null;}
+  }
+  async function releaseOcrWorker(){const w=activeOcrWorker;activeOcrWorker=null;activeOcrWorkerPromise=null;activeOcrProgress=null;if(w){try{await w.terminate();}catch{}}}
   function ocrTokenClean(v){return String(v||'').replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9%.'’\-]+$/g,'').trim();}
   function ocrSex(v){const x=String(v||'').replace(/[^A-Za-z]/g,'').toUpperCase();return x==='F'||x==='FEMALE'?'F':x==='M'||x==='MALE'?'M':'';}
   function ocrMark(v){const x=String(v||'').trim().toUpperCase();if(/^(ABS|ABSENT|A)$/.test(x))return'ABSENT';const n=Number(x.replace('%',''));return Number.isFinite(n)&&n>=0&&n<=100?n:null;}
@@ -271,7 +336,7 @@
     const subjects=state.me?.subjects||[],subjectWords=subjects.map(s=>String(s.name||'').toLowerCase()).filter(Boolean),rows=[];
     const seen=new Set();
     for(let raw of String(text||'').split(/\r?\n/)){
-      raw=raw.replace(/[|\t]+/g,' ').replace(/\s+/g,' ').trim();
+      raw=raw.replace(/[|\t,;]+/g,' ').replace(/\s+/g,' ').trim();
       if(!raw||raw.length<3)continue;
       const lower=raw.toLowerCase();
       if((lower.includes('name')&&(lower.includes('sex')||lower.includes('gender'))) || lower.includes('total') || lower.includes('position') || lower.includes('average'))continue;
@@ -300,18 +365,50 @@
     }
     return rows;
   }
+  function extOf(file){const n=String(file?.name||'').toLowerCase();const i=n.lastIndexOf('.');return i>=0?n.slice(i):'';}
+  function xmlText(xml){try{return new DOMParser().parseFromString(xml,'application/xml').documentElement?.textContent||'';}catch{return String(xml||'').replace(/<[^>]+>/g,' ');}}
+  function stripRtf(t){return String(t||'').replace(/\\'[0-9a-fA-F]{2}/g,' ').replace(/\\[a-zA-Z]+-?\d* ?/g,' ').replace(/[{}]/g,' ').replace(/\s+/g,' ');}
+  async function imageToText(source,onProgress){const worker=await ensureOcrWorker(onProgress);activeOcrProgress=onProgress||null;const result=await worker.recognize(source);return result?.data?.text||'';}
+  async function pdfToText(file,onStatus){
+    const P=await loadPdfJs(),buf=await file.arrayBuffer(),pdf=await P.getDocument({data:buf}).promise;let all=[];
+    for(let i=1;i<=pdf.numPages;i++){
+      if(onStatus)onStatus(`Reading PDF page ${i} of ${pdf.numPages}…`,(i-1)/pdf.numPages);
+      const page=await pdf.getPage(i),tc=await page.getTextContent();let text=(tc.items||[]).map(x=>x.str||'').join(' ').trim();
+      if(text.length<25){const vp=page.getViewport({scale:1.6}),canvas=document.createElement('canvas');canvas.width=Math.ceil(vp.width);canvas.height=Math.ceil(vp.height);await page.render({canvasContext:canvas.getContext('2d'),viewport:vp}).promise;text=await imageToText(canvas,p=>onStatus&&onStatus(`OCR PDF page ${i} of ${pdf.numPages}…`,((i-1)+p)/pdf.numPages));}
+      all.push(text);
+    }
+    return all.join('\n');
+  }
+  async function spreadsheetToText(file){const X=await loadXlsx(),wb=X.read(await file.arrayBuffer(),{type:'array'}),parts=[];for(const name of wb.SheetNames){const rows=X.utils.sheet_to_json(wb.Sheets[name],{header:1,defval:''});for(const row of rows)parts.push(row.map(v=>String(v??'').trim()).join('\t'));}return parts.join('\n');}
+  async function docxToText(file){const M=await loadMammoth(),r=await M.extractRawText({arrayBuffer:await file.arrayBuffer()});return r.value||'';}
+  async function zippedDocumentToText(file,kind){const Z=await loadJSZip(),zip=await Z.loadAsync(await file.arrayBuffer()),names=Object.keys(zip.files).filter(n=>!zip.files[n].dir);let chosen=[];if(kind==='pptx')chosen=names.filter(n=>/^ppt\/slides\/slide\d+\.xml$/i.test(n)).sort((a,b)=>(Number(a.match(/slide(\d+)/i)?.[1]||0)-Number(b.match(/slide(\d+)/i)?.[1]||0)));else if(kind==='odt')chosen=names.filter(n=>/content\.xml$/i.test(n));else if(kind==='epub')chosen=names.filter(n=>/\.(xhtml|html|htm)$/i.test(n));const out=[];for(const n of chosen){out.push(xmlText(await zip.files[n].async('text')));}return out.join('\n');}
+  async function fileToText(file,onStatus){
+    const ext=extOf(file),type=String(file.type||'').toLowerCase();
+    if(type.startsWith('image/')||['.jpg','.jpeg','.png','.webp','.bmp','.gif','.tif','.tiff'].includes(ext)){onStatus&&onStatus(`Reading image ${file.name}…`,0);return imageToText(file,p=>onStatus&&onStatus(`Reading image ${file.name}…`,p));}
+    if(ext==='.pdf'||type==='application/pdf')return pdfToText(file,onStatus);
+    if(['.xlsx','.xls','.xlsm','.xlsb','.csv','.tsv','.ods'].includes(ext)||type.includes('spreadsheet')||type.includes('excel')||type==='text/csv')return spreadsheetToText(file);
+    if(ext==='.docx'||type.includes('wordprocessingml'))return docxToText(file);
+    if(ext==='.pptx')return zippedDocumentToText(file,'pptx');
+    if(ext==='.odt')return zippedDocumentToText(file,'odt');
+    if(ext==='.epub')return zippedDocumentToText(file,'epub');
+    if(['.txt','.log','.md','.json','.xml','.html','.htm'].includes(ext)||type.startsWith('text/'))return file.text();
+    if(ext==='.rtf')return stripRtf(await file.text());
+    if(ext==='.doc'||ext==='.ppt')throw new Error(`${file.name}: old ${ext.toUpperCase()} files cannot be read safely in the browser. Save/export it as DOCX, PPTX or PDF and upload again.`);
+    throw new Error(`${file.name}: this file type is not supported yet. Use an image, PDF, Excel/CSV, Word DOCX, PowerPoint PPTX, ODT, EPUB or text file.`);
+  }
   function openScreenshotImport(){
     if(!(state.me?.subjects?.length)){toast('Add the class subjects first',true);navigate('subjects');return;}
     let rows=[];
     const subjects=state.me.subjects||[];
-    showModal(`<div class="modal-scroll screenshot-import-modal">${workflowBar('pupils')}<div class="page-head"><h2>📷 Upload Screenshot</h2><p>Use a screenshot of a pupil list or results sheet. EduSend will read it and let you correct everything before saving.</p></div>
-      <div class="screenshot-privacy">🔒 The screenshot is read on this device. EduSend only saves the pupil details and marks after you confirm the review.</div>
+    showModal(`<div class="modal-scroll screenshot-import-modal">${workflowBar('pupils')}<div class="page-head"><h2>📎 Upload Results File</h2><p>Upload a picture, screenshot or school document. EduSend will read it and let you correct everything before saving.</p></div>
+      <div class="screenshot-privacy">🔒 Files are read on this device. EduSend only saves pupil details and marks after you confirm the review.</div>
       <div class="screenshot-controls">
-        <label>What is in the screenshot?<select id="screenshotMode"><option value="NAMES">Pupil names / class list</option><option value="RESULTS">Pupil names + results</option></select></label>
-        <label>Select screenshot(s)<input id="screenshotFiles" type="file" accept="image/*" multiple></label>
+        <label>What is in the file?<select id="screenshotMode"><option value="NAMES">Pupil names / class list</option><option value="RESULTS">Pupil names + results</option></select></label>
+        <label>Select file(s)<input id="screenshotFiles" type="file" accept="image/*,.pdf,.xlsx,.xls,.xlsm,.xlsb,.csv,.tsv,.ods,.docx,.doc,.pptx,.ppt,.odt,.epub,.txt,.rtf,.md,.json,.xml,.html,.htm" multiple></label>
       </div>
-      <div id="subjectOrderNote" class="assessment-note">For results screenshots, numeric marks are matched left-to-right to: <b>${subjects.map(s=>esc(s.name)).join(' → ')}</b>.</div>
-      <button id="scanScreenshots" type="button" class="btn primary big full">Read Screenshot</button>
+      <div class="file-format-note"><b>Accepted:</b> images/screenshots, PDF, Excel, CSV, Word DOCX, PowerPoint PPTX, ODT, EPUB and text files. Old DOC/PPT files should first be exported to PDF or DOCX/PPTX.</div>
+      <div id="subjectOrderNote" class="assessment-note">For result files, numeric marks are matched left-to-right to: <b>${subjects.map(s=>esc(s.name)).join(' → ')}</b>.</div>
+      <button id="scanScreenshots" type="button" class="btn primary big full">Read File</button>
       <div id="ocrStatus" class="ocr-status"></div><div id="ocrReview"></div>
     </div>`);
     const review=byId('ocrReview'),status=byId('ocrStatus'),modeEl=byId('screenshotMode');
@@ -319,7 +416,7 @@
       if(!rows.length){review.innerHTML='';return;}
       const mode=modeEl.value;
       const markHeads=mode==='RESULTS'?subjects.map(s=>`<th>${esc(s.name)}</th>`).join(''):'';
-      review.innerHTML=`<div class="ocr-review-head"><div><b>${rows.length} row${rows.length===1?'':'s'} detected</b><span>Check spellings, sex and marks before importing.</span></div></div><div class="ocr-table-wrap"><table class="ocr-table"><thead><tr><th>First name</th><th>Surname</th><th>Sex</th>${markHeads}<th></th></tr></thead><tbody>${rows.map((r,i)=>`<tr data-ocr-row="${i}"><td><input data-field="firstName" value="${esc(r.firstName)}"></td><td><input data-field="surname" value="${esc(r.surname)}"></td><td><select data-field="sex"><option value="">Choose</option><option value="F" ${r.sex==='F'?'selected':''}>Female</option><option value="M" ${r.sex==='M'?'selected':''}>Male</option></select></td>${mode==='RESULTS'?subjects.map((s,j)=>{const v=r.marks?.[j];return `<td><input class="ocr-mark" data-mark="${j}" value="${v==='ABSENT'?'ABS':(v??'')}" inputmode="decimal" placeholder="—"></td>`}).join(''):''}<td><button type="button" class="icon-btn danger-icon" data-remove-ocr="${i}" title="Remove row">×</button></td></tr>`).join('')}</tbody></table></div><div class="screenshot-import-actions"><button id="confirmScreenshotImport" type="button" class="btn primary big">Confirm Import</button><button id="rescanScreenshots" type="button" class="btn ghost">Choose another screenshot</button></div><p class="helper">Rows with an existing pupil name will be matched instead of creating a duplicate. Sex is required for any new pupil.</p>`;
+      review.innerHTML=`<div class="ocr-review-head"><div><b>${rows.length} row${rows.length===1?'':'s'} detected</b><span>Check spellings, sex and marks before importing.</span></div></div><div class="ocr-table-wrap"><table class="ocr-table"><thead><tr><th>First name</th><th>Surname</th><th>Sex</th>${markHeads}<th></th></tr></thead><tbody>${rows.map((r,i)=>`<tr data-ocr-row="${i}"><td><input data-field="firstName" value="${esc(r.firstName)}"></td><td><input data-field="surname" value="${esc(r.surname)}"></td><td><select data-field="sex"><option value="">Choose</option><option value="F" ${r.sex==='F'?'selected':''}>Female</option><option value="M" ${r.sex==='M'?'selected':''}>Male</option></select></td>${mode==='RESULTS'?subjects.map((s,j)=>{const v=r.marks?.[j];return `<td><input class="ocr-mark" data-mark="${j}" value="${v==='ABSENT'?'ABS':(v??'')}" inputmode="decimal" placeholder="—"></td>`}).join(''):''}<td><button type="button" class="icon-btn danger-icon" data-remove-ocr="${i}" title="Remove row">×</button></td></tr>`).join('')}</tbody></table></div><div class="screenshot-import-actions"><button id="confirmScreenshotImport" type="button" class="btn primary big">Confirm Import</button><button id="rescanScreenshots" type="button" class="btn ghost">Choose another file</button></div><p class="helper">Rows with an existing pupil name will be matched instead of creating a duplicate. Sex is required for any new pupil.</p>`;
       review.querySelectorAll('[data-remove-ocr]').forEach(b=>b.onclick=()=>{rows.splice(Number(b.dataset.removeOcr),1);renderReview();});
       byId('rescanScreenshots').onclick=()=>{rows=[];review.innerHTML='';byId('screenshotFiles').value='';status.textContent='';};
       byId('confirmScreenshotImport').onclick=async()=>{
@@ -336,11 +433,17 @@
     }
     modeEl.onchange=()=>{rows=[];review.innerHTML='';status.textContent='';};
     byId('scanScreenshots').onclick=async()=>{
-      const files=[...(byId('screenshotFiles').files||[])];if(!files.length){toast('Choose at least one screenshot',true);return;}
-      const btn=byId('scanScreenshots');btn.disabled=true;rows=[];review.innerHTML='';
-      try{const T=await loadTesseract();let combined=[];for(let i=0;i<files.length;i++){status.innerHTML=`<b>Reading screenshot ${i+1} of ${files.length}…</b><div class="ocr-progress"><span style="width:${Math.round((i/files.length)*100)}%"></span></div>`;const result=await T.recognize(files[i],'eng',{logger:m=>{if(m.status==='recognizing text'&&Number.isFinite(m.progress)){const pct=Math.round(((i+m.progress)/files.length)*100);status.innerHTML=`<b>Reading screenshot ${i+1} of ${files.length}… ${Math.round(m.progress*100)}%</b><div class="ocr-progress"><span style="width:${pct}%"></span></div>`;}}});combined=combined.concat(parseScreenshotText(result?.data?.text||'',modeEl.value));}
-        const uniq=new Map();for(const r of combined){const k=(r.firstName+' '+r.surname).toLowerCase().replace(/[^a-z]/g,'');if(k&&!uniq.has(k))uniq.set(k,r);}rows=[...uniq.values()];status.innerHTML=rows.length?`<span class="ocr-success">✓ Screenshot read. Review the detected rows below.</span>`:`<span class="ocr-warning">No pupil rows were confidently detected. Try a clearer, tightly cropped screenshot.</span>`;renderReview();
-      }catch(err){console.error(err);status.innerHTML=`<span class="ocr-warning">${esc(err.message||'Could not read the screenshot')}</span>`;}finally{btn.disabled=false;btn.textContent='Read Screenshot';}
+      const files=[...(byId('screenshotFiles').files||[])];if(!files.length){toast('Choose at least one file',true);return;}
+      const btn=byId('scanScreenshots');btn.disabled=true;rows=[];review.innerHTML='';let combined=[],errors=[];
+      try{
+        for(let i=0;i<files.length;i++){
+          const f=files[i];status.innerHTML=`<b>Reading ${esc(f.name)} (${i+1} of ${files.length})…</b><div class="ocr-progress"><span style="width:${Math.round((i/files.length)*100)}%"></span></div>`;
+          try{const text=await fileToText(f,(msg,p)=>{const pct=Math.round(((i+(Number.isFinite(p)?p:0))/files.length)*100);status.innerHTML=`<b>${esc(msg)}</b><div class="ocr-progress"><span style="width:${pct}%"></span></div>`;});combined=combined.concat(parseScreenshotText(text,modeEl.value));}catch(err){console.error(err);errors.push(`${f.name}: ${err.message||'Could not read this file'}`);}
+        }
+        const uniq=new Map();for(const r of combined){const k=(r.firstName+' '+r.surname).toLowerCase().replace(/[^a-z]/g,'');if(k&&!uniq.has(k))uniq.set(k,r);}rows=[...uniq.values()];
+        const errorHtml=errors.length?`<div class="ocr-warning">${errors.map(esc).join('<br>')}</div>`:'';
+        status.innerHTML=(rows.length?`<span class="ocr-success">✓ File reading complete. Review the detected rows below.</span>`:`<span class="ocr-warning">No pupil rows were confidently detected. Check the file layout or try a clearer export/screenshot.</span>`)+errorHtml;renderReview();
+      }catch(err){console.error(err);status.innerHTML=`<span class="ocr-warning">${esc(err.message||'Could not read the file')}</span>`;}finally{await releaseOcrWorker();btn.disabled=false;btn.textContent='Read File';}
     };
   }
 
@@ -421,8 +524,8 @@
       <div class="pupil-name-block"><b>${esc(n.firstName)} ${esc(n.surname)}</b><span>${esc(sex)} • ${m.summary.completedCount}/${m.summary.total} subjects checked • ${m.summary.sat} sat ${m.summary.complete?'• Complete':''}</span><div class="mini-pupil-actions"><button class="mini-result-btn" type="button" data-enter-results="${p.id}">✎ ${m.summary.complete?'Review Results':'Continue Results'}</button><button class="mini-report-btn" type="button" data-view-report="${p.id}">▤ Report</button></div></div>
       <div class="pupil-row-actions"><button class="icon-btn" type="button" data-edit-pupil="${p.id}" title="Edit pupil">✎</button><button class="icon-btn danger-icon" type="button" data-delete-pupil="${p.id}" title="Remove pupil">×</button></div>
     </article>`}).join(''):`<div class="empty-pupils"><div class="empty-plus">＋</div><h3>No pupils added yet</h3><p>Tap <b>+ Add Pupil</b>. After you save the pupil, the app will immediately ask for results one subject at a time.</p></div>`;
-    c.innerHTML=`${workflowBar('pupils')}<div class="page-head row-head pupils-head"><div><h2>Pupils & Results</h2><p>${esc(d.class?.name||'Your class')} • ${pupils.length} ${pupils.length===1?'pupil':'pupils'} • ${esc(assessmentLabel(d))}</p></div><div class="pupil-head-actions"><button id="uploadScreenshot" class="btn ghost screenshot-btn" type="button">📷 Upload Screenshot</button><button id="addPupil" class="btn primary add-pupil-btn" type="button"><span class="plus-symbol">＋</span> Add Pupil</button></div></div>
-      <div class="screenshot-tip"><b>Have a class list or results screenshot?</b> Upload it and review the detected names/marks instead of typing everything manually.</div>
+    c.innerHTML=`${workflowBar('pupils')}<div class="page-head row-head pupils-head"><div><h2>Pupils & Results</h2><p>${esc(d.class?.name||'Your class')} • ${pupils.length} ${pupils.length===1?'pupil':'pupils'} • ${esc(assessmentLabel(d))}</p></div><div class="pupil-head-actions"><button id="uploadScreenshot" class="btn ghost screenshot-btn" type="button">📎 Upload Results File</button><button id="addPupil" class="btn primary add-pupil-btn" type="button"><span class="plus-symbol">＋</span> Add Pupil</button></div></div>
+      <div class="screenshot-tip"><b>Have a class list or results file?</b> Upload a picture, PDF, spreadsheet, Word document or other supported file and review the detected names/marks instead of typing everything manually.</div>
       <div class="pupil-list">${list}</div>${pupils.length?'<button id="addAnotherPupil" class="btn primary full add-another" type="button">＋ Add another pupil</button>':''}${pupils.length?'<button id="goReports" class="btn ghost full" type="button">Continue to Reports →</button>':''}`;
     byId('uploadScreenshot').onclick=openScreenshotImport;byId('addPupil').onclick=()=>openPupilForm();if(byId('addAnotherPupil'))byId('addAnotherPupil').onclick=()=>openPupilForm();if(byId('goReports'))byId('goReports').onclick=()=>navigate('reports');
     c.querySelectorAll('[data-enter-results]').forEach(b=>b.onclick=()=>openGuidedResults(b.dataset.enterResults,firstMissingSubjectIndex(b.dataset.enterResults)));
@@ -534,7 +637,7 @@
     const d=state.me;if(!setupComplete()){c.innerHTML='<div class="notice">Add at least one subject and at least one pupil first.</div>';return;}
     const heads=d.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('');
     const rows=d.pupils.map((p,i)=>`<tr><th class="pupil-cell"><span>${i+1}. ${esc(p.name)}</span><small>${esc(p.examNo||'')}</small></th>${d.subjects.map(s=>{const v=d.marks?.[p.id]?.[s.id],abs=v==='ABSENT',val=abs?'':(v??'');return `<td><input class="mark-box" data-pupil="${p.id}" data-subject="${s.id}" data-status="${abs?'ABSENT':''}" type="number" min="0" max="100" step="0.1" value="${val}" placeholder="${abs?'ABS':'—'}" title="${abs?'Marked absent':'Enter mark'}"></td>`}).join('')}</tr>`).join('');
-    c.innerHTML=`<div class="page-head row-head"><div><h2>Results Grid</h2><p>${esc(assessmentLabel(d))} • ${esc(d.class?.term||'Term 1')} ${esc(d.class?.academicYear||'')}</p></div><div class="results-head-actions"><button id="uploadResultsScreenshot" class="btn ghost screenshot-btn" type="button">📷 Upload Screenshot</button><div id="saveState" class="save-state">✓ Saved</div></div></div><div class="marks-wrap"><table class="marks-table"><thead><tr><th class="pupil-cell">Pupil</th>${heads}</tr></thead><tbody>${rows}</tbody></table></div><p class="helper">Blank means no mark entered. Marks save automatically. You can also upload a results screenshot and review detected marks before importing.</p>`;
+    c.innerHTML=`<div class="page-head row-head"><div><h2>Results Grid</h2><p>${esc(assessmentLabel(d))} • ${esc(d.class?.term||'Term 1')} ${esc(d.class?.academicYear||'')}</p></div><div class="results-head-actions"><button id="uploadResultsScreenshot" class="btn ghost screenshot-btn" type="button">📎 Upload Results File</button><div id="saveState" class="save-state">✓ Saved</div></div></div><div class="marks-wrap"><table class="marks-table"><thead><tr><th class="pupil-cell">Pupil</th>${heads}</tr></thead><tbody>${rows}</tbody></table></div><p class="helper">Blank means no mark entered. Marks save automatically. You can also upload a results file and review detected marks before importing.</p>`;
     byId('uploadResultsScreenshot').onclick=openScreenshotImport;
     c.querySelectorAll('.mark-box').forEach(input=>input.addEventListener('input',e=>{e.currentTarget.dataset.status='';scheduleSave();}));
   }
