@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION='3.1.11';
+  const APP_VERSION='3.1.12';
   const app=document.getElementById('app');
   const state={me:null,page:'home',saveTimer:null,recoveryTimer:null,mirrorTimer:null,recoveryBusy:false,mirrorBusy:false};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
@@ -8,6 +8,17 @@
   const GRADE12_EXTRA_ASSESSMENTS=['Pre-Mock Exam','Mock Exam','Post-Mock Exam'];
   const GRADE_LEVEL_OPTIONS=[['FORM1','Form 1'],['FORM2','Form 2'],['GRADE10','Grade 10'],['GRADE11','Grade 11'],['GRADE12','Grade 12'],['OTHER','Other class']];
   const STREAMS={FORM1:['L','M'],FORM2:['L','M'],GRADE10:['L','N','P','M'],GRADE11:['L','N','P','M'],GRADE12:['L','N','P','M']};
+  const SUBJECT_CODE_MAP={
+    ENG:'English',ENGLISH:'English',MAT:'Mathematics',MATH:'Mathematics',MATHS:'Mathematics',MATHEMATICS:'Mathematics',
+    BIO:'Biology',BIOLOGY:'Biology',SCI:'Science',SCIENCE:'Science',GEO:'Geography',GEOG:'Geography',GEOGRAPHY:'Geography',
+    CVE:'Civic Education',CIVIC:'Civic Education',CIVICS:'Civic Education',COM:'Commerce',COMMERCE:'Commerce',
+    ACC:'Accounts',ACCTS:'Accounts',ACCOUNTING:'Accounts',ACCOUNTS:'Accounts',CHEM:'Chemistry',CHEMISTRY:'Chemistry',
+    PHY:'Physics',PHYS:'Physics',PHYSICS:'Physics',RE:'Religious Education',RELIGIOUS:'Religious Education',
+    ICT:'ICT',CS:'Computer Studies',COMP:'Computer Studies',AGRIC:'Agricultural Science',AGR:'Agricultural Science',
+    HIST:'History',HISTORY:'History',LIT:'Literature',ART:'Art',PE:'Physical Education'
+  };
+  const SUBJECT_SKIP_CODES=new Set(['PTS','POINTS','TOTAL','AVE','AVG','AVERAGE','POS','POSITION','SN','NO']);
+  function subjectNameFromCode(value){const raw=String(value||'').trim(),code=raw.toUpperCase().replace(/[^A-Z0-9]/g,'');if(!code||SUBJECT_SKIP_CODES.has(code))return'';return SUBJECT_CODE_MAP[code]||raw.replace(/[_-]+/g,' ').replace(/\b\w/g,c=>c.toUpperCase());}
   function normalizeGradeLevel(value){const v=String(value||'').trim().toUpperCase().replace(/[^A-Z0-9]/g,'');return ['FORM1','FORM2','GRADE10','GRADE11','GRADE12'].includes(v)?v:'OTHER';}
   function parseClassSelection(value){const raw=String(value||'').trim();let m;if((m=raw.match(/^FORM\s*1\s*([A-Z0-9-]+)?$/i)))return{gradeLevel:'FORM1',stream:(m[1]||'').toUpperCase()};if((m=raw.match(/^FORM\s*2\s*([A-Z0-9-]+)?$/i)))return{gradeLevel:'FORM2',stream:(m[1]||'').toUpperCase()};if((m=raw.match(/^(?:GRADE\s*)?(10|11|12)\s*([A-Z0-9-]+)?$/i)))return{gradeLevel:`GRADE${m[1]}`,stream:(m[2]||'').toUpperCase()};return{gradeLevel:'OTHER',stream:''};}
   function classNameForSelection(gradeLevel,stream,customClass=''){const g=normalizeGradeLevel(gradeLevel),st=String(stream||'').trim().toUpperCase();if(g==='FORM1')return `Form 1${st}`;if(g==='FORM2')return `Form 2${st}`;if(g==='GRADE10')return `10${st}`;if(g==='GRADE11')return `11${st}`;if(g==='GRADE12')return `12${st}`;return String(customClass||'').trim();}
@@ -350,6 +361,7 @@
   function ocrTokenClean(v){return String(v||'').replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9%.'’\-]+$/g,'').trim();}
   function ocrSex(v){const x=String(v||'').replace(/[^A-Za-z]/g,'').toUpperCase();return x==='F'||x==='FEMALE'?'F':x==='M'||x==='MALE'?'M':'';}
   function ocrMark(v){const x=String(v||'').trim().toUpperCase();if(/^(ABS|ABSENT|A)$/.test(x))return'ABSENT';const n=Number(x.replace('%',''));return Number.isFinite(n)&&n>=0&&n<=100?n:null;}
+  function ocrMarkLoose(v){let x=String(v||'').trim().toUpperCase().replace(/\s+/g,'');if(!x)return null;if(/^[-–—]+$/.test(x)||/^(ABS|ABSENT)$/.test(x))return'ABSENT';x=x.replace(/[OQ]/g,'0').replace(/[IL|]/g,'1').replace(/S/g,'5').replace(/B/g,'8').replace(/[^0-9.-]/g,'');if(!x)return null;const n=Number(x);return Number.isFinite(n)&&n>=0&&n<=100?n:null;}
   function parseScreenshotText(text,mode='NAMES'){
     const subjects=state.me?.subjects||[],subjectWords=subjects.map(s=>String(s.name||'').toLowerCase()).filter(Boolean),rows=[];
     const seen=new Set();
@@ -370,14 +382,14 @@
       let nameTokens=tokens.slice(0,nameEnd).filter(t=>/[A-Za-z]/.test(t) && !/^NO\.?$/i.test(t));
       if(nameTokens.length<2)continue;
       if(nameTokens.length>5)nameTokens=nameTokens.slice(0,5);
-      const firstName=nameTokens[0],surname=nameTokens.slice(1).join(' ');
+      const surname=nameTokens[0],firstName=nameTokens.slice(1).join(' ');
       if(!firstName||!surname)continue;
       const key=(firstName+' '+surname).toLowerCase().replace(/[^a-z]/g,'');
       if(!key||seen.has(key))continue;
       const after=tokens.slice(Math.max(nameEnd+(sexIndex>=0?1:0),nameEnd));
       let marks=[];
       if(mode==='RESULTS'){
-        for(const t of after){const m=ocrMark(t);if(m!==null)marks.push(m);if(marks.length>=subjects.length)break;}
+        for(const t of after){const m=ocrMarkLoose(t);if(m!==null)marks.push(m);if(marks.length>=subjects.length)break;}
       }
       rows.push({firstName,surname,sex,marks,raw});seen.add(key);
     }
@@ -391,50 +403,78 @@
   function ocrBox(word){const b=word?.bbox||word?.boundingBox||{};const x0=Number(b.x0??b.left??0),y0=Number(b.y0??b.top??0),x1=Number(b.x1??b.right??x0),y1=Number(b.y1??b.bottom??y0);return{x0,y0,x1,y1,cx:(x0+x1)/2,cy:(y0+y1)/2};}
   function ocrWordText(word){return String(word?.text||word?.symbols?.map?.(x=>x.text).join('')||'').trim();}
   function cleanPrintedName(value){
-    const parts=String(value||'').replace(/[^A-Za-z'’\- ]+/g,' ').split(/\s+/).filter(Boolean).filter(x=>x.length>1);
+    const parts=String(value||'').replace(/[^A-Za-z'’\- ]+/g,' ').split(/\s+/).filter(Boolean).filter(x=>x.length>1&&!/^(SURNAME|FIRST|FIRSTNAME|SEX|MALE|FEMALE)$/i.test(x));
     return parts.map(x=>x.toLowerCase().replace(/(^|[-'’])([a-z])/g,(m,p,c)=>p+c.toUpperCase())).join(' ');
   }
   function median(nums){const a=nums.filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return 0;const m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2;}
-  function tablePupilRowsFromWords(words){
-    const W=(Array.isArray(words)?words:[]).map(w=>({raw:w,text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.box.x1>w.box.x0&&w.box.y1>w.box.y0&&w.conf>=20);
-    if(!W.length)return[];
-    const norm=t=>String(t||'').toUpperCase().replace(/[^A-Z]/g,'');
-    const surnameHead=W.find(w=>norm(w.text)==='SURNAME');
-    let firstHead=W.find(w=>['FIRSTNAME','FIRSTNAMES','FORENAME'].includes(norm(w.text)));
-    if(!firstHead){const fw=W.find(w=>norm(w.text)==='FIRST');if(fw){const near=W.find(w=>norm(w.text)==='NAME'&&Math.abs(w.box.cy-fw.box.cy)<Math.max(12,(fw.box.y1-fw.box.y0)*1.4)&&w.box.cx>fw.box.cx);if(near)firstHead={text:'FIRSTNAME',box:{...fw.box,cx:(fw.box.cx+near.box.cx)/2,cy:(fw.box.cy+near.box.cy)/2,x0:fw.box.x0,x1:near.box.x1,y0:Math.min(fw.box.y0,near.box.y0),y1:Math.max(fw.box.y1,near.box.y1)},conf:Math.min(fw.conf,near.conf)};}}
-    const sexHead=W.find(w=>['SEX','GENDER'].includes(norm(w.text)));
-    if(!surnameHead||!firstHead||!sexHead)return[];
-    const headerY=median([surnameHead.box.cy,firstHead.box.cy,sexHead.box.cy]);
-    const surnameX=surnameHead.box.cx,firstX=firstHead.box.cx,sexX=sexHead.box.cx;
-    const rightHeaders=W.filter(w=>w.box.cy<headerY+Math.max(30,(sexHead.box.y1-sexHead.box.y0)*2.5)&&w.box.cx>sexX).sort((a,b)=>a.box.cx-b.box.cx);
-    const nextHead=rightHeaders.find(w=>/^[A-Z]{2,8}$/.test(norm(w.text)));
-    const gap=Math.max(25,firstX-surnameX,sexX-firstX);
-    const surnameLeft=surnameX-gap*0.75,surnameRight=(surnameX+firstX)/2;
-    const firstLeft=surnameRight,firstRight=(firstX+sexX)/2;
-    const sexLeft=firstRight,sexRight=nextHead?(sexX+nextHead.box.cx)/2:sexX+gap*0.65;
-    const serials=W.filter(w=>w.box.cy>headerY&&w.box.cx<surnameLeft&&/^\d{1,3}[.)]?$/.test(w.text.replace(/\s/g,''))).map(w=>({n:Number(w.text.replace(/\D/g,'')),y:w.box.cy,box:w.box})).filter(x=>x.n>=1&&x.n<=120).sort((a,b)=>a.y-b.y);
-    const anchors=[];for(const x of serials){if(!anchors.length||Math.abs(x.y-anchors[anchors.length-1].y)>5)anchors.push(x);}
-    if(anchors.length<2)return[];
-    const gaps=anchors.slice(1).map((x,i)=>x.y-anchors[i].y).filter(x=>x>4),rowGap=median(gaps)||28;
+  async function sourceToCanvas(source){
+    let bmp=null,img=null;
+    if(source instanceof HTMLCanvasElement)return source;
+    try{bmp=await createImageBitmap(source);}catch{}
+    if(!bmp){img=await new Promise((resolve,reject)=>{const el=new Image(),u=URL.createObjectURL(source);el.onload=()=>{URL.revokeObjectURL(u);resolve(el)};el.onerror=()=>{URL.revokeObjectURL(u);reject(new Error('Could not decode image'))};el.src=u;});}
+    const sw=bmp?bmp.width:img.naturalWidth,sh=bmp?bmp.height:img.naturalHeight,maxDim=Math.max(sw,sh),scale=Math.min(2.1,Math.max(1.15,2400/maxDim));
+    const canvas=document.createElement('canvas');canvas.width=Math.round(sw*scale);canvas.height=Math.round(sh*scale);const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(bmp||img,0,0,canvas.width,canvas.height);
+    try{const im=ctx.getImageData(0,0,canvas.width,canvas.height),d=im.data;for(let i=0;i<d.length;i+=4){const g=.299*d[i]+.587*d[i+1]+.114*d[i+2],v=Math.max(0,Math.min(255,(g-128)*1.28+138));d[i]=d[i+1]=d[i+2]=v;}ctx.putImageData(im,0,0);}catch{}
+    try{bmp?.close?.();}catch{}return canvas;
+  }
+  function normOcr(t){return String(t||'').toUpperCase().replace(/[^A-Z0-9]/g,'');}
+  function findHeaderWord(W,names){return W.find(w=>names.includes(normOcr(w.text)));}
+  function tableStructureFromWords(words){
+    const W=(Array.isArray(words)?words:[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.box.x1>w.box.x0&&w.box.y1>w.box.y0&&w.conf>=12);
+    if(!W.length)return null;
+    const surnameHead=findHeaderWord(W,['SURNAME','SURNAMEE','SURNAM']);
+    let firstHead=findHeaderWord(W,['FIRSTNAME','FIRSTNAMES','FORENAME','FIRSTNAM']);
+    if(!firstHead){const fw=findHeaderWord(W,['FIRST']);if(fw){const near=W.filter(w=>normOcr(w.text)==='NAME'&&w.box.cx>fw.box.cx).sort((a,b)=>Math.abs(a.box.cy-fw.box.cy)-Math.abs(b.box.cy-fw.box.cy))[0];if(near&&Math.abs(near.box.cy-fw.box.cy)<50)firstHead={text:'FIRSTNAME',box:{x0:fw.box.x0,x1:near.box.x1,y0:Math.min(fw.box.y0,near.box.y0),y1:Math.max(fw.box.y1,near.box.y1),cx:(fw.box.cx+near.box.cx)/2,cy:(fw.box.cy+near.box.cy)/2},conf:Math.min(fw.conf,near.conf)};}}
+    const sexHead=findHeaderWord(W,['SEX','GENDER']);
+    if(!surnameHead||!firstHead||!sexHead)return null;
+    const headerY=median([surnameHead.box.cy,firstHead.box.cy,sexHead.box.cy]),headH=median([surnameHead.box.y1-surnameHead.box.y0,firstHead.box.y1-firstHead.box.y0,sexHead.box.y1-sexHead.box.y0])||24;
+    const subjectHeaders=[];
+    for(const w of W){if(w.box.cx<=sexHead.box.cx||Math.abs(w.box.cy-headerY)>Math.max(40,headH*2.2))continue;const code=normOcr(w.text);if(!code||SUBJECT_SKIP_CODES.has(code))continue;const name=subjectNameFromCode(code);if(!name)continue;if((SUBJECT_CODE_MAP[code]||/^[A-Z]{2,5}$/.test(code))&&!subjectHeaders.some(x=>x.code===code))subjectHeaders.push({code,name,x:w.box.cx,box:w.box});}
+    subjectHeaders.sort((a,b)=>a.x-b.x);const subjects=[];for(const h of subjectHeaders){if(subjects.length>=10)break;if(!subjects.some(s=>s.name.toLowerCase()===h.name.toLowerCase()))subjects.push(h);}
+    if(!subjects.length)return null;
+    const surnameX=surnameHead.box.cx,firstX=firstHead.box.cx,sexX=sexHead.box.cx,firstSubjectX=subjects[0].x;
+    const surnameLeft=Math.max(0,surnameX-(firstX-surnameX)*.75),surnameRight=(surnameX+firstX)/2,firstLeft=surnameRight,firstRight=(firstX+sexX)/2,sexLeft=firstRight,sexRight=(sexX+firstSubjectX)/2;
+    let anchors=W.filter(w=>w.box.cy>headerY+headH*.7&&w.box.cx<surnameLeft&&/^\d{1,3}[.)]?$/.test(String(w.text).replace(/\s/g,''))).map(w=>({y:w.box.cy,n:Number(String(w.text).replace(/\D/g,''))})).filter(x=>x.n>=1&&x.n<=150).sort((a,b)=>a.y-b.y);
+    const ded=[];for(const a of anchors){if(!ded.length||Math.abs(a.y-ded[ded.length-1].y)>8)ded.push(a);}anchors=ded;
+    if(anchors.length<2){anchors=W.filter(w=>w.box.cy>headerY+headH*.7&&w.box.cx>=sexLeft&&w.box.cx<sexRight&&!!ocrSex(w.text)).map(w=>({y:w.box.cy,n:0})).sort((a,b)=>a.y-b.y);const d=[];for(const a of anchors){if(!d.length||Math.abs(a.y-d[d.length-1].y)>8)d.push(a);}anchors=d;}
+    if(anchors.length<2)return null;
+    const rowGap=median(anchors.slice(1).map((a,i)=>a.y-anchors[i].y).filter(x=>x>8))||headH*1.7;
     const rows=[];
     for(let i=0;i<anchors.length;i++){
-      const a=anchors[i],top=i?((anchors[i-1].y+a.y)/2):(a.y-rowGap*0.48),bottom=i<anchors.length-1?((a.y+anchors[i+1].y)/2):(a.y+rowGap*0.48);
+      const y=anchors[i].y,top=i?(anchors[i-1].y+y)/2:y-rowGap*.48,bottom=i<anchors.length-1?(y+anchors[i+1].y)/2:y+rowGap*.48;
       const inRow=W.filter(w=>w.box.cy>=top&&w.box.cy<bottom);
-      const cell=(lo,hi)=>inRow.filter(w=>w.box.cx>=lo&&w.box.cx<hi).sort((x,y)=>x.box.x0-y.box.x0).map(w=>w.text).join(' ');
+      const cell=(lo,hi)=>inRow.filter(w=>w.box.cx>=lo&&w.box.cx<hi).sort((a,b)=>a.box.x0-b.box.x0).map(w=>w.text).join(' ');
       const surname=cleanPrintedName(cell(surnameLeft,surnameRight)),firstName=cleanPrintedName(cell(firstLeft,firstRight));
-      const sexTokens=inRow.filter(w=>w.box.cx>=sexLeft&&w.box.cx<sexRight).sort((x,y)=>Math.abs(x.box.cx-sexX)-Math.abs(y.box.cx-sexX));
-      let sex='';for(const w of sexTokens){sex=ocrSex(w.text);if(sex)break;}
-      if(firstName&&surname)rows.push({firstName,surname,sex,marks:[],serial:a.n,source:'table'});
+      let sex='';for(const w of inRow.filter(w=>w.box.cx>=sexLeft&&w.box.cx<sexRight).sort((a,b)=>Math.abs(a.box.cx-sexX)-Math.abs(b.box.cx-sexX))){sex=ocrSex(w.text);if(sex)break;}
+      if(!surname||!firstName)continue;
+      rows.push({surname,firstName,sex,marks:Array(subjects.length).fill(null),top,bottom,y});
     }
-    return rows;
+    if(!rows.length)return null;
+    return{subjects,rows,headerY,width:Math.max(...W.map(w=>w.box.x1)),words:W};
   }
-  async function imageToPupilRows(file,onStatus){
-    const source=await imageSourceForOcr(file);
-    const result=await imageOcrResult(source,p=>onStatus&&onStatus(`Reading pupil table ${file.name}…`,p));
-    const structured=tablePupilRowsFromWords(result?.data?.words||[]);
-    if(structured.length)return structured;
-    return parseScreenshotText(result?.data?.text||'','NAMES');
+  function attachMarksByCoordinates(table,words){
+    if(!table)return table;const W=(Array.isArray(words)?words:[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.box.x1>w.box.x0&&w.box.y1>w.box.y0&&w.conf>=5);
+    const centers=table.subjects.map(s=>s.x),bounds=centers.map((x,i)=>({lo:i?((centers[i-1]+x)/2):(x-(centers[1]??x+80)-x)/2,hi:i<centers.length-1?((x+centers[i+1])/2):(x+(x-(centers[i-1]??x-80))/2)}));
+    for(const row of table.rows){row.marks=table.subjects.map((s,i)=>{const b=bounds[i],tokens=W.filter(w=>w.box.cy>=row.top&&w.box.cy<row.bottom&&w.box.cx>=b.lo&&w.box.cx<b.hi).sort((a,b)=>a.box.x0-b.box.x0).map(w=>w.text);if(!tokens.length)return null;const joined=tokens.join('');let m=ocrMarkLoose(joined);if(m!==null)return m;for(const t of tokens){m=ocrMarkLoose(t);if(m!==null)return m;}return null;});}
+    return table;
   }
+  async function imageToStructuredClass(file,onStatus){
+    const source=await imageSourceForOcr(file),canvas=await sourceToCanvas(source),worker=await ensureOcrWorker(p=>onStatus&&onStatus(`Reading table structure ${file.name}…`,p*.52));
+    try{await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'6'});}catch{}
+    const base=await worker.recognize(canvas),table=tableStructureFromWords(base?.data?.words||[]);
+    if(!table)return{subjects:[],rows:parseScreenshotText(base?.data?.text||'','RESULTS')};
+    let digitWords=[];try{await worker.setParameters({tessedit_char_whitelist:'0123456789-OIlQSB',tessedit_pageseg_mode:'6'});const digits=await worker.recognize(canvas);digitWords=digits?.data?.words||[];}catch{}
+    attachMarksByCoordinates(table,digitWords.length?digitWords:(base?.data?.words||[]));
+    return{subjects:table.subjects.map(s=>({code:s.code,name:s.name})),rows:table.rows.map(r=>({firstName:r.firstName,surname:r.surname,sex:r.sex,marks:r.marks}))};
+  }
+  function detectStructuredTextTable(text){
+    const lines=String(text||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean);let hi=-1,headers=[];
+    for(let i=0;i<lines.length;i++){const parts=lines[i].split(/\t+|\s{2,}/).map(x=>x.trim()).filter(Boolean),norms=parts.map(normOcr);if(norms.some(x=>x.startsWith('SURNAME'))&&norms.some(x=>x.startsWith('FIRST'))&&norms.some(x=>x==='SEX'||x==='GENDER')){hi=i;headers=parts;break;}}
+    if(hi<0)return{subjects:[],rows:parseScreenshotText(text,'RESULTS')};const norms=headers.map(normOcr),sexIdx=norms.findIndex(x=>x==='SEX'||x==='GENDER'),subjects=[];for(const h of headers.slice(sexIdx+1)){const code=normOcr(h);if(SUBJECT_SKIP_CODES.has(code))break;const name=subjectNameFromCode(code);if(name)subjects.push({code,name});}
+    const rows=[];for(const line of lines.slice(hi+1)){let p=line.split(/\t+|\s{2,}/).map(x=>x.trim()).filter(Boolean);if(p.length<3)continue;if(/^\d+[.)]?$/.test(p[0]))p=p.slice(1);if(p.length<3)continue;const surname=cleanPrintedName(p[0]),firstName=cleanPrintedName(p[1]),sex=ocrSex(p[2]);if(!surname||!firstName)continue;const marks=subjects.map((_,i)=>ocrMarkLoose(p[3+i]||''));rows.push({firstName,surname,sex,marks});}
+    return{subjects,rows};
+  }
+  async function imageToPupilRows(file,onStatus){const out=await imageToStructuredClass(file,onStatus);return out.rows.map(r=>({...r,marks:[]}));}
   async function pdfToText(file,onStatus){
     const P=await loadPdfJs(),buf=await file.arrayBuffer(),pdf=await P.getDocument({data:buf}).promise;let all=[];
     for(let i=1;i<=pdf.numPages;i++){
@@ -462,6 +502,33 @@
     if(ext==='.doc'||ext==='.ppt')throw new Error(`${file.name}: old ${ext.toUpperCase()} files cannot be read safely in the browser. Save/export it as DOCX, PPTX or PDF and upload again.`);
     throw new Error(`${file.name}: this file type is not supported yet. Use an image, PDF, Excel/CSV, Word DOCX, PowerPoint PPTX, ODT, EPUB or text file.`);
   }
+  function openClassDocumentImport(){
+    let detectedSubjects=[],rows=[];
+    showModal(`<div class="modal-scroll screenshot-import-modal">${workflowBar('subjects')}<div class="page-head"><h2>🤖 Import Class & Results</h2><p>Upload one mark schedule, class list or results document. EduSend will detect subjects, pupils, sex and marks together.</p></div>
+      <div class="screenshot-privacy">🔒 Nothing is saved until you review and confirm. Printed names and M/F are prioritised; unclear handwritten marks are left blank for correction.</div>
+      <div class="screenshot-controls"><label>Select file(s)<input id="classImportFiles" type="file" accept="image/*,.heic,.heif,.pdf,.xlsx,.xls,.xlsm,.xlsb,.csv,.tsv,.ods,.docx,.pptx,.odt,.epub,.txt,.rtf,.md,.json,.xml,.html,.htm" multiple></label></div>
+      <div class="file-format-note"><b>One upload can build the class:</b> EduSend reads the subject headings first, then <b>SURNAME → FIRSTNAME → SEX → marks</b> row by row. Examples: ENG → English, MAT → Mathematics, BIO → Biology, SCI → Science, GEO → Geography, CVE → Civic Education, COM → Commerce, ACC → Accounts.</div>
+      <button id="readClassImport" type="button" class="btn primary big full">Read Class Document</button><div id="classImportStatus" class="ocr-status"></div><div id="classImportReview"></div>
+    </div>`);
+    const status=byId('classImportStatus'),review=byId('classImportReview');
+    function render(){
+      if(!detectedSubjects.length&&!rows.length){review.innerHTML='';return;}
+      review.innerHTML=`<div class="ocr-review-head"><div><b>${detectedSubjects.length} subjects • ${rows.length} pupils detected</b><span>Correct anything that is unclear, then confirm the whole class import.</span></div></div>
+        <div class="class-import-subjects"><h3>Detected Subjects</h3><div class="detected-subject-grid">${detectedSubjects.map((s,i)=>`<label><small>${esc(s.code||`Subject ${i+1}`)}</small><input data-subject-name="${i}" value="${esc(s.name)}"></label>`).join('')}</div></div>
+        <div class="ocr-table-wrap"><table class="ocr-table"><thead><tr><th>First name</th><th>Surname</th><th>Sex</th>${detectedSubjects.map(s=>`<th>${esc(s.name)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map((r,i)=>`<tr data-class-row="${i}"><td><input data-field="firstName" value="${esc(r.firstName)}"></td><td><input data-field="surname" value="${esc(r.surname)}"></td><td><select data-field="sex"><option value="">Choose</option><option value="F" ${r.sex==='F'?'selected':''}>Female</option><option value="M" ${r.sex==='M'?'selected':''}>Male</option></select></td>${detectedSubjects.map((s,j)=>`<td><input class="ocr-mark" data-mark="${j}" value="${r.marks?.[j]==='ABSENT'?'ABS':(r.marks?.[j]??'')}" inputmode="decimal" placeholder="—"></td>`).join('')}<td><button type="button" class="icon-btn danger-icon" data-remove-class-row="${i}">×</button></td></tr>`).join('')}</tbody></table></div>
+        <div class="screenshot-import-actions"><button id="confirmClassImport" class="btn primary big" type="button">Confirm Class Import</button><button id="chooseClassFileAgain" class="btn ghost" type="button">Choose another file</button></div>
+        <p class="helper">Existing subjects and pupils are matched where possible. New ones are added. Existing pupil names/sex can be corrected from the reviewed document. Blank mark cells do not overwrite an existing mark.</p>`;
+      review.querySelectorAll('[data-remove-class-row]').forEach(b=>b.onclick=()=>{rows.splice(Number(b.dataset.removeClassRow),1);render();});
+      byId('chooseClassFileAgain').onclick=()=>{detectedSubjects=[];rows=[];review.innerHTML='';byId('classImportFiles').value='';status.textContent='';};
+      byId('confirmClassImport').onclick=async()=>{
+        const subjects=[...review.querySelectorAll('[data-subject-name]')].map((input,i)=>({code:detectedSubjects[i]?.code||'',name:input.value.trim()})).filter(x=>x.name);if(!subjects.length){toast('Check the detected subjects first',true);return;}
+        const payload=[];let invalid=false;for(const tr of review.querySelectorAll('tbody tr')){const obj={firstName:tr.querySelector('[data-field="firstName"]').value.trim(),surname:tr.querySelector('[data-field="surname"]').value.trim(),sex:tr.querySelector('[data-field="sex"]').value,marks:[]};if(!obj.firstName||!obj.surname||!['F','M'].includes(obj.sex)){invalid=true;tr.classList.add('ocr-row-error');continue;}for(const input of tr.querySelectorAll('[data-mark]')){const raw=input.value.trim();if(!raw){obj.marks.push(null);continue;}if(/^(ABS|ABSENT|A)$/i.test(raw)){obj.marks.push('ABSENT');continue;}const n=Number(raw);if(!Number.isFinite(n)||n<0||n>100){invalid=true;input.classList.add('input-error');obj.marks.push(null);}else obj.marks.push(n);}payload.push(obj);}if(invalid){toast('Correct the highlighted pupil details or marks',true);return;}
+        const btn=byId('confirmClassImport');btn.disabled=true;btn.textContent='Importing…';try{const r=await api('/api/class-import',{method:'POST',body:{subjects,rows:payload}});state.me=r.state;closeModal();toast(`Class updated: ${r.subjectsCreated||0} subjects added • ${r.created||0} pupils added • ${r.matched||0} pupils updated • ${r.marksSaved||0} marks saved`);await navigate('pupils');}catch(err){toast(err.message,true);btn.disabled=false;btn.textContent='Confirm Class Import';}
+      };
+    }
+    byId('readClassImport').onclick=async()=>{const files=[...(byId('classImportFiles').files||[])];if(!files.length){toast('Choose at least one file',true);return;}const btn=byId('readClassImport');btn.disabled=true;detectedSubjects=[];rows=[];let errors=[];try{for(let i=0;i<files.length;i++){const f=files[i];const progress=(msg,p)=>{const pct=Math.round(((i+(Number.isFinite(p)?p:0))/files.length)*100);status.innerHTML=`<b>${esc(msg)}</b><div class="ocr-progress"><span style="width:${pct}%"></span></div>`;};try{const ext=extOf(f),type=String(f.type||'').toLowerCase(),isImage=type.startsWith('image/')||['.jpg','.jpeg','.png','.webp','.bmp','.gif','.tif','.tiff','.heic','.heif'].includes(ext);let out;if(isImage)out=await imageToStructuredClass(f,progress);else out=detectStructuredTextTable(await fileToText(f,progress));for(const sub of out.subjects||[]){if(!detectedSubjects.some(x=>x.name.toLowerCase()===sub.name.toLowerCase())&&detectedSubjects.length<10)detectedSubjects.push(sub);}rows=rows.concat(out.rows||[]);}catch(err){console.error(err);errors.push(`${f.name}: ${err.message||'Could not read this file'}`);}}const uniq=new Map();for(const r of rows){const k=(r.firstName+' '+r.surname).toLowerCase().replace(/[^a-z]/g,'');if(k&&!uniq.has(k))uniq.set(k,r);}rows=[...uniq.values()];const warn=errors.length?`<div class="ocr-warning">${errors.map(esc).join('<br>')}</div>`:'';status.innerHTML=(rows.length?`<span class="ocr-success">✓ Structured class data detected. Review subjects, pupil names, sex and marks below.</span>`:`<span class="ocr-warning">The table was not detected confidently. Try a straighter, closer photo or an exported PDF/Excel file.</span>`)+warn;render();}catch(err){status.innerHTML=`<span class="ocr-warning">${esc(err.message||'Could not read the document')}</span>`;}finally{await releaseOcrWorker();btn.disabled=false;btn.textContent='Read Class Document';}};
+  }
+
   function openScreenshotImport(){
     if(!(state.me?.subjects?.length)){toast('Add the class subjects first',true);navigate('subjects');return;}
     let rows=[];
@@ -598,7 +665,7 @@
     c.innerHTML=`${workflowBar('pupils')}<div class="page-head row-head pupils-head"><div><h2>Pupils & Results</h2><p>${esc(d.class?.name||'Your class')} • ${pupils.length} ${pupils.length===1?'pupil':'pupils'} • ${esc(assessmentLabel(d))}</p></div><div class="pupil-head-actions"><button id="uploadScreenshot" class="btn ghost screenshot-btn" type="button">📎 Upload Results File</button><button id="addPupil" class="btn primary add-pupil-btn" type="button"><span class="plus-symbol">＋</span> Add Pupil</button></div></div>
       <div class="screenshot-tip"><b>Have a class list or results file?</b> Upload a picture, PDF, spreadsheet, Word document or other supported file and review the detected names/marks instead of typing everything manually.</div>
       <div class="pupil-list">${list}</div>${pupils.length?'<button id="addAnotherPupil" class="btn primary full add-another" type="button">＋ Add another pupil</button>':''}${pupils.length?'<button id="goReports" class="btn ghost full" type="button">Continue to Reports →</button>':''}`;
-    byId('uploadScreenshot').onclick=openScreenshotImport;byId('addPupil').onclick=()=>openPupilForm();if(byId('addAnotherPupil'))byId('addAnotherPupil').onclick=()=>openPupilForm();if(byId('goReports'))byId('goReports').onclick=()=>navigate('reports');
+    byId('uploadScreenshot').onclick=openClassDocumentImport;byId('addPupil').onclick=()=>openPupilForm();if(byId('addAnotherPupil'))byId('addAnotherPupil').onclick=()=>openPupilForm();if(byId('goReports'))byId('goReports').onclick=()=>navigate('reports');
     c.querySelectorAll('[data-enter-results]').forEach(b=>b.onclick=()=>openGuidedResults(b.dataset.enterResults,firstMissingSubjectIndex(b.dataset.enterResults)));
     c.querySelectorAll('[data-view-report]').forEach(b=>b.onclick=async()=>{await navigate('reports');previewReport(b.dataset.viewReport);});
     c.querySelectorAll('[data-edit-pupil]').forEach(b=>b.onclick=()=>openPupilForm(pupils.find(p=>p.id===b.dataset.editPupil)));
@@ -628,8 +695,8 @@
   function renderSubjects(c){
     const d=state.me,subjects=d.subjects||[];
     const list=subjects.length?subjects.map((s,i)=>`<article class="subject-row"><div class="subject-number">${i+1}</div><div class="subject-name-block"><b>${esc(s.name)}</b><span>Result entry will follow this subject order.</span></div><div class="subject-row-actions"><button class="icon-btn" data-edit-subject="${s.id}" title="Edit subject">✎</button><button class="icon-btn danger-icon" data-delete-subject="${s.id}" title="Remove subject">×</button></div></article>`).join(''):`<div class="empty-pupils"><div class="empty-plus">＋</div><h3>No subjects added yet</h3><p>Add the subjects for this class one by one. The order shown here is the order used when entering each pupil's results.</p></div>`;
-    c.innerHTML=`${workflowBar('subjects')}<div class="page-head row-head subjects-head"><div><h2>Subjects for ${esc(d.class?.name||'this class')}</h2><p>${subjects.length}/10 subjects • add them in the order you want results entered</p></div><button id="addSubject" class="btn primary add-subject-btn"><span class="plus-symbol">＋</span> Add Subject</button></div><div class="subject-list">${list}</div>${subjects.length?'<button id="addAnotherSubject" class="btn ghost full add-another">＋ Add another subject</button><button id="continuePupils" class="btn primary big full">Subjects Done — Continue to Pupils →</button>':''}`;
-    byId('addSubject').onclick=()=>openSubjectForm();if(byId('addAnotherSubject'))byId('addAnotherSubject').onclick=()=>openSubjectForm();if(byId('continuePupils'))byId('continuePupils').onclick=()=>navigate('pupils');
+    c.innerHTML=`${workflowBar('subjects')}<div class="page-head row-head subjects-head"><div><h2>Subjects for ${esc(d.class?.name||'this class')}</h2><p>${subjects.length}/10 subjects • add manually or let EduSend read the class mark schedule</p></div><button id="addSubject" class="btn primary add-subject-btn"><span class="plus-symbol">＋</span> Add Subject</button></div><button id="importClassDocument" class="btn import-class-btn full" type="button">🤖 Upload Class / Results Document</button><p class="helper import-class-helper">Recommended when you already have a mark schedule: one upload can detect subjects, pupil names, M/F and marks together.</p><div class="subject-list">${list}</div>${subjects.length?'<button id="addAnotherSubject" class="btn ghost full add-another">＋ Add another subject</button><button id="continuePupils" class="btn primary big full">Subjects Done — Continue to Pupils →</button>':''}`;
+    byId('addSubject').onclick=()=>openSubjectForm();byId('importClassDocument').onclick=openClassDocumentImport;if(byId('addAnotherSubject'))byId('addAnotherSubject').onclick=()=>openSubjectForm();if(byId('continuePupils'))byId('continuePupils').onclick=()=>navigate('pupils');
     c.querySelectorAll('[data-edit-subject]').forEach(b=>b.onclick=()=>openSubjectForm(subjects.find(s=>s.id===b.dataset.editSubject)));
     c.querySelectorAll('[data-delete-subject]').forEach(b=>b.onclick=()=>removeSubject(subjects.find(s=>s.id===b.dataset.deleteSubject)));
   }
@@ -709,7 +776,7 @@
     const heads=d.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('');
     const rows=d.pupils.map((p,i)=>`<tr><th class="pupil-cell"><span>${i+1}. ${esc(p.name)}</span><small>${esc(p.examNo||'')}</small></th>${d.subjects.map(s=>{const v=d.marks?.[p.id]?.[s.id],abs=v==='ABSENT',val=abs?'':(v??'');return `<td><input class="mark-box" data-pupil="${p.id}" data-subject="${s.id}" data-status="${abs?'ABSENT':''}" type="number" min="0" max="100" step="0.1" value="${val}" placeholder="${abs?'ABS':'—'}" title="${abs?'Marked absent':'Enter mark'}"></td>`}).join('')}</tr>`).join('');
     c.innerHTML=`<div class="page-head row-head"><div><h2>Results Grid</h2><p>${esc(assessmentLabel(d))} • ${esc(d.class?.term||'Term 1')} ${esc(d.class?.academicYear||'')}</p></div><div class="results-head-actions"><button id="uploadResultsScreenshot" class="btn ghost screenshot-btn" type="button">📎 Upload Results File</button><div id="saveState" class="save-state">✓ Saved</div></div></div><div class="marks-wrap"><table class="marks-table"><thead><tr><th class="pupil-cell">Pupil</th>${heads}</tr></thead><tbody>${rows}</tbody></table></div><p class="helper">Blank means no mark entered. Marks save automatically. You can also upload a results file and review detected marks before importing.</p>`;
-    byId('uploadResultsScreenshot').onclick=openScreenshotImport;
+    byId('uploadResultsScreenshot').onclick=openClassDocumentImport;
     c.querySelectorAll('.mark-box').forEach(input=>input.addEventListener('input',e=>{e.currentTarget.dataset.status='';scheduleSave();}));
   }
 
