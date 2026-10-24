@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION='3.1.12';
+  const APP_VERSION='3.1.13';
   const app=document.getElementById('app');
   const state={me:null,page:'home',saveTimer:null,recoveryTimer:null,mirrorTimer:null,recoveryBusy:false,mirrorBusy:false};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
@@ -126,7 +126,18 @@
     return `School ${a.schoolDateType==='CLOSES'?'closes':'opens'} on ${date}`;
   }
 
-  async function bootstrap(){
+  async function activationStatus(){
+    const res=await fetch('/api/activation/status',{cache:'no-store'});
+    const data=await res.json().catch(()=>({}));
+    return !!data.activated;
+  }
+  function renderActivationGate(message=''){
+    app.innerHTML=`<div class="activation-page"><div class="activation-card"><div class="activation-logo">ES</div><h1>EduSend</h1><p class="activation-subtitle">Teacher access is locked</p><p>Enter the EduSend activation code provided to you to open the application on this device.</p><label>Activation code</label><input id="activationCode" class="activation-input" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="EDU-XXXX-XXXX-XXXX"><div id="activationError" class="activation-error">${esc(message)}</div><button id="activateEduSend" class="btn primary full activation-button">Unlock EduSend</button><small>This device will remain activated for up to one year unless browser/app data is cleared.</small></div></div>`;
+    const input=byId('activationCode'),btn=byId('activateEduSend'),err=byId('activationError');
+    const submit=async()=>{const code=String(input.value||'').trim().toUpperCase();if(!code){err.textContent='Enter the activation code.';return;}btn.disabled=true;btn.textContent='Checking…';err.textContent='';try{const res=await fetch('/api/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code}),cache:'no-store'});const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.error||'Activation failed');await bootstrapUnlocked();}catch(e){err.textContent=e.message||'Invalid activation code';btn.disabled=false;btn.textContent='Unlock EduSend';}};
+    btn.onclick=submit;input.addEventListener('keydown',e=>{if(e.key==='Enter')submit();});setTimeout(()=>input.focus(),100);
+  }
+  async function bootstrapUnlocked(){
     await requestPersistentStorage();
     await migrateLegacyRecoveries();
     state.me=await api('/api/class-data');
@@ -142,6 +153,11 @@
     navigate(first);scheduleDeviceMirror('App opened');scheduleDeviceRecovery('App opened');
     setInterval(()=>captureDeviceMirror('Automatic device mirror'),5*60*1000);
     setInterval(()=>captureDeviceRecovery('Automatic periodic recovery'),15*60*1000);
+  }
+  async function bootstrap(){
+    const activated=await activationStatus();
+    if(!activated){renderActivationGate();return;}
+    await bootstrapUnlocked();
   }
   function setupComplete(){return (state.me?.subjects?.length||0)>0&&(state.me?.pupils?.length||0)>0;}
 
