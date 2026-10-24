@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION='3.1.12';
+  const APP_VERSION='3.1.14';
   const app=document.getElementById('app');
   const state={me:null,page:'home',saveTimer:null,recoveryTimer:null,mirrorTimer:null,recoveryBusy:false,mirrorBusy:false};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
@@ -126,7 +126,18 @@
     return `School ${a.schoolDateType==='CLOSES'?'closes':'opens'} on ${date}`;
   }
 
-  async function bootstrap(){
+  async function activationStatus(){
+    const res=await fetch('/api/activation/status',{cache:'no-store'});
+    const data=await res.json().catch(()=>({}));
+    return !!data.activated;
+  }
+  function renderActivationGate(message=''){
+    app.innerHTML=`<div class="activation-page"><div class="activation-card"><div class="activation-logo">ES</div><h1>EduSend</h1><p class="activation-subtitle">Teacher access is locked</p><p>Enter the EduSend activation code provided to you to open the application on this device.</p><label>Activation code</label><input id="activationCode" class="activation-input" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="EDU-XXXX-XXXX-XXXX"><div id="activationError" class="activation-error">${esc(message)}</div><button id="activateEduSend" class="btn primary full activation-button">Unlock EduSend</button><small>This device will remain activated for up to one year unless browser/app data is cleared.</small></div></div>`;
+    const input=byId('activationCode'),btn=byId('activateEduSend'),err=byId('activationError');
+    const submit=async()=>{const code=String(input.value||'').trim().toUpperCase();if(!code){err.textContent='Enter the activation code.';return;}btn.disabled=true;btn.textContent='Checking…';err.textContent='';try{const res=await fetch('/api/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code}),cache:'no-store'});const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.error||'Activation failed');await bootstrapUnlocked();}catch(e){err.textContent=e.message||'Invalid activation code';btn.disabled=false;btn.textContent='Unlock EduSend';}};
+    btn.onclick=submit;input.addEventListener('keydown',e=>{if(e.key==='Enter')submit();});setTimeout(()=>input.focus(),100);
+  }
+  async function bootstrapUnlocked(){
     await requestPersistentStorage();
     await migrateLegacyRecoveries();
     state.me=await api('/api/class-data');
@@ -142,6 +153,11 @@
     navigate(first);scheduleDeviceMirror('App opened');scheduleDeviceRecovery('App opened');
     setInterval(()=>captureDeviceMirror('Automatic device mirror'),5*60*1000);
     setInterval(()=>captureDeviceRecovery('Automatic periodic recovery'),15*60*1000);
+  }
+  async function bootstrap(){
+    const activated=await activationStatus();
+    if(!activated){renderActivationGate();return;}
+    await bootstrapUnlocked();
   }
   function setupComplete(){return (state.me?.subjects?.length||0)>0&&(state.me?.pupils?.length||0)>0;}
 
@@ -419,52 +435,110 @@
   }
   function normOcr(t){return String(t||'').toUpperCase().replace(/[^A-Z0-9]/g,'');}
   function findHeaderWord(W,names){return W.find(w=>names.includes(normOcr(w.text)));}
+  function cleanPrintedToken(value){
+    const noise=new Set(['LUMEZI','BOARDING','SECONDARY','SCHOOL','WEEK','FOUR','ASSESSMENT','TERM','GRADE','MARK','SCHEDULE','NOTE','DO','NOT','SEPARATE','PHYSICS','FROM','CHEMISTRY','SURNAME','FIRSTNAME','FIRST','NAME','SEX','SN']);
+    let x=String(value||'').replace(/[^A-Za-z'’\-]/g,'').trim();
+    if(x.length<2||x.length>24)return'';const up=x.toUpperCase();if(noise.has(up))return'';
+    return x.toLowerCase().replace(/(^|[-'’])([a-z])/g,(m,p,c)=>p+c.toUpperCase());
+  }
+  function ocrSexLoose(v){const x=String(v||'').replace(/[^A-Za-z]/g,'').toUpperCase();if(x==='M'||x==='MM')return'M';if(x==='F'||x==='FF')return'F';return'';}
+  function editDistance(a,b){a=String(a||'');b=String(b||'');const d=Array(b.length+1).fill(0).map((_,j)=>j);for(let i=1;i<=a.length;i++){let prev=d[0];d[0]=i;for(let j=1;j<=b.length;j++){const old=d[j];d[j]=Math.min(d[j]+1,d[j-1]+1,prev+(a[i-1]===b[j-1]?0:1));prev=old;}}return d[b.length];}
+  function fuzzySubjectCode(raw){const code=normOcr(raw);if(SUBJECT_CODE_MAP[code])return code;const candidates=Object.keys(SUBJECT_CODE_MAP).filter(x=>x.length>=2&&x.length<=5);let best='',dist=9;for(const c of candidates){if(Math.abs(c.length-code.length)>1)continue;const d=editDistance(code,c);if(d<dist){dist=d;best=c;}}return dist<=1?best:'';}
   function tableStructureFromWords(words){
-    const W=(Array.isArray(words)?words:[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.box.x1>w.box.x0&&w.box.y1>w.box.y0&&w.conf>=12);
+    const W=(Array.isArray(words)?words:[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.box.x1>w.box.x0&&w.box.y1>w.box.y0&&w.conf>=8);
     if(!W.length)return null;
     const surnameHead=findHeaderWord(W,['SURNAME','SURNAMEE','SURNAM']);
     let firstHead=findHeaderWord(W,['FIRSTNAME','FIRSTNAMES','FORENAME','FIRSTNAM']);
-    if(!firstHead){const fw=findHeaderWord(W,['FIRST']);if(fw){const near=W.filter(w=>normOcr(w.text)==='NAME'&&w.box.cx>fw.box.cx).sort((a,b)=>Math.abs(a.box.cy-fw.box.cy)-Math.abs(b.box.cy-fw.box.cy))[0];if(near&&Math.abs(near.box.cy-fw.box.cy)<50)firstHead={text:'FIRSTNAME',box:{x0:fw.box.x0,x1:near.box.x1,y0:Math.min(fw.box.y0,near.box.y0),y1:Math.max(fw.box.y1,near.box.y1),cx:(fw.box.cx+near.box.cx)/2,cy:(fw.box.cy+near.box.cy)/2},conf:Math.min(fw.conf,near.conf)};}}
+    if(!firstHead){const fw=findHeaderWord(W,['FIRST']);if(fw){const near=W.filter(w=>normOcr(w.text)==='NAME'&&w.box.cx>fw.box.cx).sort((a,b)=>Math.abs(a.box.cy-fw.box.cy)-Math.abs(b.box.cy-fw.box.cy))[0];if(near&&Math.abs(near.box.cy-fw.box.cy)<60)firstHead={text:'FIRSTNAME',box:{x0:fw.box.x0,x1:near.box.x1,y0:Math.min(fw.box.y0,near.box.y0),y1:Math.max(fw.box.y1,near.box.y1),cx:(fw.box.cx+near.box.cx)/2,cy:(fw.box.cy+near.box.cy)/2},conf:Math.min(fw.conf,near.conf)};}}
     const sexHead=findHeaderWord(W,['SEX','GENDER']);
     if(!surnameHead||!firstHead||!sexHead)return null;
+    const snHead=findHeaderWord(W,['SN','SNO','NO']);
     const headerY=median([surnameHead.box.cy,firstHead.box.cy,sexHead.box.cy]),headH=median([surnameHead.box.y1-surnameHead.box.y0,firstHead.box.y1-firstHead.box.y0,sexHead.box.y1-sexHead.box.y0])||24;
     const subjectHeaders=[];
-    for(const w of W){if(w.box.cx<=sexHead.box.cx||Math.abs(w.box.cy-headerY)>Math.max(40,headH*2.2))continue;const code=normOcr(w.text);if(!code||SUBJECT_SKIP_CODES.has(code))continue;const name=subjectNameFromCode(code);if(!name)continue;if((SUBJECT_CODE_MAP[code]||/^[A-Z]{2,5}$/.test(code))&&!subjectHeaders.some(x=>x.code===code))subjectHeaders.push({code,name,x:w.box.cx,box:w.box});}
+    for(const w of W){
+      if(w.box.cx<=sexHead.box.cx||Math.abs(w.box.cy-headerY)>Math.max(46,headH*2.4))continue;
+      let code=fuzzySubjectCode(w.text);if(!code||SUBJECT_SKIP_CODES.has(code))continue;
+      const name=SUBJECT_CODE_MAP[code];if(!name)continue;
+      if(!subjectHeaders.some(x=>x.code===code))subjectHeaders.push({code,name,x:w.box.cx,box:w.box});
+    }
     subjectHeaders.sort((a,b)=>a.x-b.x);const subjects=[];for(const h of subjectHeaders){if(subjects.length>=10)break;if(!subjects.some(s=>s.name.toLowerCase()===h.name.toLowerCase()))subjects.push(h);}
-    if(!subjects.length)return null;
-    const surnameX=surnameHead.box.cx,firstX=firstHead.box.cx,sexX=sexHead.box.cx,firstSubjectX=subjects[0].x;
-    const surnameLeft=Math.max(0,surnameX-(firstX-surnameX)*.75),surnameRight=(surnameX+firstX)/2,firstLeft=surnameRight,firstRight=(firstX+sexX)/2,sexLeft=firstRight,sexRight=(sexX+firstSubjectX)/2;
-    let anchors=W.filter(w=>w.box.cy>headerY+headH*.7&&w.box.cx<surnameLeft&&/^\d{1,3}[.)]?$/.test(String(w.text).replace(/\s/g,''))).map(w=>({y:w.box.cy,n:Number(String(w.text).replace(/\D/g,''))})).filter(x=>x.n>=1&&x.n<=150).sort((a,b)=>a.y-b.y);
-    const ded=[];for(const a of anchors){if(!ded.length||Math.abs(a.y-ded[ded.length-1].y)>8)ded.push(a);}anchors=ded;
-    if(anchors.length<2){anchors=W.filter(w=>w.box.cy>headerY+headH*.7&&w.box.cx>=sexLeft&&w.box.cx<sexRight&&!!ocrSex(w.text)).map(w=>({y:w.box.cy,n:0})).sort((a,b)=>a.y-b.y);const d=[];for(const a of anchors){if(!d.length||Math.abs(a.y-d[d.length-1].y)>8)d.push(a);}anchors=d;}
+    const surnameX=surnameHead.box.cx,firstX=firstHead.box.cx,sexX=sexHead.box.cx;
+    const firstSubjectX=subjects[0]?.x || (sexX+Math.max(55,(sexX-firstX)*.9));
+    const snX=snHead?.box.cx ?? Math.max(0,surnameX-(firstX-surnameX)*.72);
+    const surnameLeft=(snX+surnameX)/2,surnameRight=(surnameX+firstX)/2,firstLeft=surnameRight,firstRight=(firstX+sexX)/2,sexLeft=firstRight,sexRight=(sexX+firstSubjectX)/2;
+    let anchors=W.filter(w=>w.box.cy>headerY+headH*.6&&w.box.cx< surnameLeft&&/^\d{1,3}[.)]?$/.test(String(w.text).replace(/\s/g,''))).map(w=>({y:w.box.cy,n:Number(String(w.text).replace(/\D/g,''))})).filter(x=>x.n>=1&&x.n<=200).sort((a,b)=>a.y-b.y);
+    const ded=[];for(const a of anchors){if(!ded.length||Math.abs(a.y-ded[ded.length-1].y)>9)ded.push(a);}anchors=ded;
+    if(anchors.length<3){
+      anchors=W.filter(w=>w.box.cy>headerY+headH*.6&&w.box.cx>=sexLeft&&w.box.cx<sexRight&&!!ocrSexLoose(w.text)).map(w=>({y:w.box.cy,n:0})).sort((a,b)=>a.y-b.y);
+      const d=[];for(const a of anchors){if(!d.length||Math.abs(a.y-d[d.length-1].y)>9)d.push(a);}anchors=d;
+    }
     if(anchors.length<2)return null;
-    const rowGap=median(anchors.slice(1).map((a,i)=>a.y-anchors[i].y).filter(x=>x>8))||headH*1.7;
+    const rowGap=median(anchors.slice(1).map((a,i)=>a.y-anchors[i].y).filter(x=>x>10))||headH*1.8;
     const rows=[];
+    const chooseName=(inRow,lo,hi,targetX)=>{
+      const cands=inRow.filter(w=>w.box.cx>=lo&&w.box.cx<hi&&w.conf>=18).map(w=>({name:cleanPrintedToken(w.text),w})).filter(x=>x.name).sort((a,b)=>((b.w.conf-a.w.conf)*1.5)+(Math.abs(a.w.box.cx-targetX)-Math.abs(b.w.box.cx-targetX)));
+      return cands[0]?.name||'';
+    };
     for(let i=0;i<anchors.length;i++){
       const y=anchors[i].y,top=i?(anchors[i-1].y+y)/2:y-rowGap*.48,bottom=i<anchors.length-1?(y+anchors[i+1].y)/2:y+rowGap*.48;
       const inRow=W.filter(w=>w.box.cy>=top&&w.box.cy<bottom);
-      const cell=(lo,hi)=>inRow.filter(w=>w.box.cx>=lo&&w.box.cx<hi).sort((a,b)=>a.box.x0-b.box.x0).map(w=>w.text).join(' ');
-      const surname=cleanPrintedName(cell(surnameLeft,surnameRight)),firstName=cleanPrintedName(cell(firstLeft,firstRight));
-      let sex='';for(const w of inRow.filter(w=>w.box.cx>=sexLeft&&w.box.cx<sexRight).sort((a,b)=>Math.abs(a.box.cx-sexX)-Math.abs(b.box.cx-sexX))){sex=ocrSex(w.text);if(sex)break;}
-      if(!surname||!firstName)continue;
-      rows.push({surname,firstName,sex,marks:Array(subjects.length).fill(null),top,bottom,y});
+      const surname=chooseName(inRow,surnameLeft,surnameRight,surnameX),firstName=chooseName(inRow,firstLeft,firstRight,firstX);
+      let sex='';for(const w of inRow.filter(w=>w.box.cx>=sexLeft&&w.box.cx<sexRight).sort((a,b)=>Math.abs(a.box.cx-sexX)-Math.abs(b.box.cx-sexX))){sex=ocrSexLoose(w.text);if(sex)break;}
+      rows.push({serial:anchors[i].n||i+1,surname,firstName,sex,marks:Array(subjects.length).fill(null),top,bottom,y});
     }
-    if(!rows.length)return null;
-    return{subjects,rows,headerY,width:Math.max(...W.map(w=>w.box.x1)),words:W};
+    return{subjects,rows,headerY,headH,surnameLeft,surnameRight,firstLeft,firstRight,sexLeft,sexRight,surnameX,firstX,sexX,width:Math.max(...W.map(w=>w.box.x1)),words:W};
+  }
+  function cropCanvasRegion(canvas,x0,y0,x1,y1,scale=1.7){
+    x0=Math.max(0,Math.floor(x0));y0=Math.max(0,Math.floor(y0));x1=Math.min(canvas.width,Math.ceil(x1));y1=Math.min(canvas.height,Math.ceil(y1));
+    const out=document.createElement('canvas');out.width=Math.max(1,Math.round((x1-x0)*scale));out.height=Math.max(1,Math.round((y1-y0)*scale));const ctx=out.getContext('2d',{willReadFrequently:true});ctx.imageSmoothingEnabled=true;ctx.drawImage(canvas,x0,y0,x1-x0,y1-y0,0,0,out.width,out.height);return{canvas:out,x0,y0,scale};
+  }
+  async function refineIdentityColumns(table,canvas,worker,onStatus){
+    if(!table?.rows?.length)return table;const y0=Math.max(0,Math.min(...table.rows.map(r=>r.top))),y1=Math.min(canvas.height,Math.max(...table.rows.map(r=>r.bottom)));
+    const configs=[['surname',table.surnameLeft,table.surnameRight],['firstName',table.firstLeft,table.firstRight],['sex',table.sexLeft,table.sexRight]];
+    for(let ci=0;ci<configs.length;ci++){
+      const [key,lo,hi]=configs[ci],pad=Math.max(4,(hi-lo)*.05),cr=cropCanvasRegion(canvas,lo-pad,y0,hi+pad,y1,key==='sex'?2.1:1.8);
+      try{await worker.setParameters({tessedit_pageseg_mode:'6',preserve_interword_spaces:'1',tessedit_char_whitelist:key==='sex'?'MFmf':"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-'"});}catch{}
+      onStatus&&onStatus(`Refining ${key==='firstName'?'first names':key}…`,.55+ci*.08);
+      const res=await worker.recognize(cr.canvas),words=(res?.data?.words||[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.conf>=10);
+      for(const row of table.rows){
+        const rt=(row.top-y0)*cr.scale,rb=(row.bottom-y0)*cr.scale,ry=(row.y-y0)*cr.scale;
+        const cands=words.filter(w=>w.box.cy>=rt&&w.box.cy<rb).sort((a,b)=>Math.abs(a.box.cy-ry)-Math.abs(b.box.cy-ry)||b.conf-a.conf);
+        if(key==='sex'){for(const w of cands){const sx=ocrSexLoose(w.text);if(sx){row.sex=sx;break;}}}
+        else{const n=cands.map(w=>({name:cleanPrintedToken(w.text),w})).filter(x=>x.name).sort((a,b)=>b.w.conf-a.w.conf)[0]?.name;if(n)row[key]=n;}
+      }
+    }
+    table.rows=table.rows.filter(r=>r.surname&&r.firstName&&r.sex);
+    return table;
   }
   function attachMarksByCoordinates(table,words){
-    if(!table)return table;const W=(Array.isArray(words)?words:[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.box.x1>w.box.x0&&w.box.y1>w.box.y0&&w.conf>=5);
+    if(!table?.subjects?.length)return table;const W=(Array.isArray(words)?words:[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.box.x1>w.box.x0&&w.box.y1>w.box.y0&&w.conf>=5);
     const centers=table.subjects.map(s=>s.x),bounds=centers.map((x,i)=>({lo:i?((centers[i-1]+x)/2):(x-(centers[1]??x+80)-x)/2,hi:i<centers.length-1?((x+centers[i+1])/2):(x+(x-(centers[i-1]??x-80))/2)}));
+    table.subjectBounds=bounds;
     for(const row of table.rows){row.marks=table.subjects.map((s,i)=>{const b=bounds[i],tokens=W.filter(w=>w.box.cy>=row.top&&w.box.cy<row.bottom&&w.box.cx>=b.lo&&w.box.cx<b.hi).sort((a,b)=>a.box.x0-b.box.x0).map(w=>w.text);if(!tokens.length)return null;const joined=tokens.join('');let m=ocrMarkLoose(joined);if(m!==null)return m;for(const t of tokens){m=ocrMarkLoose(t);if(m!==null)return m;}return null;});}
     return table;
   }
+  async function refineMarksByColumns(table,canvas,worker,onStatus){
+    if(!table?.subjects?.length||!table?.rows?.length)return table;const y0=Math.max(0,Math.min(...table.rows.map(r=>r.top))),y1=Math.min(canvas.height,Math.max(...table.rows.map(r=>r.bottom))),centers=table.subjects.map(s=>s.x),bounds=table.subjectBounds||centers.map((x,i)=>({lo:i?((centers[i-1]+x)/2):x-45,hi:i<centers.length-1?((x+centers[i+1])/2):x+45}));
+    for(let i=0;i<table.subjects.length;i++){
+      const b=bounds[i],cr=cropCanvasRegion(canvas,b.lo,y0,b.hi,y1,1.9);try{await worker.setParameters({tessedit_pageseg_mode:'6',tessedit_char_whitelist:'0123456789-'});}catch{}
+      onStatus&&onStatus(`Reading ${table.subjects[i].name} marks…`,.78+(i/Math.max(1,table.subjects.length))*.2);
+      const res=await worker.recognize(cr.canvas),words=(res?.data?.words||[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.conf>=4);
+      for(const row of table.rows){const rt=(row.top-y0)*cr.scale,rb=(row.bottom-y0)*cr.scale,ry=(row.y-y0)*cr.scale;const cands=words.filter(w=>w.box.cy>=rt&&w.box.cy<rb).sort((a,b)=>Math.abs(a.box.cy-ry)-Math.abs(b.box.cy-ry)||b.conf-a.conf);for(const w of cands){const m=ocrMarkLoose(w.text);if(m!==null){row.marks[i]=m;break;}}}
+    }
+    return table;
+  }
   async function imageToStructuredClass(file,onStatus){
-    const source=await imageSourceForOcr(file),canvas=await sourceToCanvas(source),worker=await ensureOcrWorker(p=>onStatus&&onStatus(`Reading table structure ${file.name}…`,p*.52));
+    const source=await imageSourceForOcr(file),canvas=await sourceToCanvas(source),worker=await ensureOcrWorker(p=>onStatus&&onStatus(`Reading table structure ${file.name}…`,p*.48));
     try{await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'6'});}catch{}
     const base=await worker.recognize(canvas),table=tableStructureFromWords(base?.data?.words||[]);
-    if(!table)return{subjects:[],rows:parseScreenshotText(base?.data?.text||'','RESULTS')};
-    let digitWords=[];try{await worker.setParameters({tessedit_char_whitelist:'0123456789-OIlQSB',tessedit_pageseg_mode:'6'});const digits=await worker.recognize(canvas);digitWords=digits?.data?.words||[];}catch{}
-    attachMarksByCoordinates(table,digitWords.length?digitWords:(base?.data?.words||[]));
+    if(!table)throw new Error(`${file.name}: EduSend could not confidently locate the SURNAME, FIRSTNAME and SEX table columns. Try a straighter, closer photo of the mark table.`);
+    await refineIdentityColumns(table,canvas,worker,onStatus);
+    if(!table.rows.length)throw new Error(`${file.name}: no pupil rows with a clear surname, first name and M/F sex were found. Try a clearer photo focused on the table.`);
+    if(table.subjects.length){
+      let digitWords=[];try{await worker.setParameters({tessedit_char_whitelist:'0123456789-',tessedit_pageseg_mode:'6'});const digits=await worker.recognize(canvas);digitWords=digits?.data?.words||[];}catch{}
+      attachMarksByCoordinates(table,digitWords.length?digitWords:(base?.data?.words||[]));
+      await refineMarksByColumns(table,canvas,worker,onStatus);
+    }
     return{subjects:table.subjects.map(s=>({code:s.code,name:s.name})),rows:table.rows.map(r=>({firstName:r.firstName,surname:r.surname,sex:r.sex,marks:r.marks}))};
   }
   function detectStructuredTextTable(text){
