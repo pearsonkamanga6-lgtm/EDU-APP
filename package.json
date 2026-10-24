@@ -1,8 +1,8 @@
 {
   "name": "reportform-zm",
-  "version": "3.1.12",
+  "version": "3.1.13",
   "private": true,
-  "description": "EduSend class report app with one-year recovery and one-upload structured class, subject, pupil and results import for images, PDF, spreadsheets, DOCX and common school documents",
+  "description": "EduSend class report app with one-year recovery, structured class/results import, and one-time teacher activation-code lock",
   "scripts": {
     "start": "node server.js"
   },
