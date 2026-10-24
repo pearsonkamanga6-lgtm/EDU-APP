@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.1.11';
+const APP_VERSION = '3.1.12';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -257,6 +257,23 @@ async function workspaceApi(db,workspaceKey,req,urlObj){
   const subjectMatch=pathname.match(/^\/api\/subjects\/([^/]+)$/);
   if(subjectMatch&&req.method==='PUT'){const cls=c.userClass(user.id),subject=cls&&db.subjects.find(s=>s.id===decodeURIComponent(subjectMatch[1])&&s.classId===cls.id&&s.active!==false);if(!subject)return{status:404,body:{error:'Subject not found'}};const b=await readJson(req),name=String(b.name||'').trim().replace(/\s+/g,' ');if(!name)return{status:400,body:{error:'Enter the subject name'}};if(c.classSubjects(cls.id).some(s=>s.id!==subject.id&&s.name.toLowerCase()===name.toLowerCase()))return{status:409,body:{error:'That subject is already in this class'}};subject.name=name;return{status:200,body:{subject,state:stateForUser(db,user,workspaceKey)}};}
   if(subjectMatch&&req.method==='DELETE'){const cls=c.userClass(user.id),subject=cls&&db.subjects.find(s=>s.id===decodeURIComponent(subjectMatch[1])&&s.classId===cls.id&&s.active!==false);if(!subject)return{status:404,body:{error:'Subject not found'}};subject.active=false;subject.removedAt=nowIso();return{status:200,body:{removed:true,state:stateForUser(db,user,workspaceKey)}};}
+
+  if(req.method==='POST'&&pathname==='/api/class-import'){
+    const b=await readJson(req),cls=c.userClass(user.id),assessment=c.userAssessment(user.id);if(!cls||!assessment)return{status:404,body:{error:'Class or assessment not found'}};
+    const incomingSubjects=Array.isArray(b.subjects)?b.subjects.slice(0,10):[],rows=Array.isArray(b.rows)?b.rows.slice(0,150):[];
+    if(!incomingSubjects.length)return{status:400,body:{error:'No subjects were supplied for import'}};if(!rows.length)return{status:400,body:{error:'No pupil rows were supplied for import'}};
+    const norm=v=>String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    const currentSubjects=c.classSubjects(cls.id),subjectMap=new Map();for(const sub of currentSubjects){subjectMap.set(norm(sub.name),sub);}
+    const orderedSubjects=[];let subjectsCreated=0,subjectsMatched=0;
+    for(const raw of incomingSubjects){const name=String(raw?.name||'').trim().replace(/\s+/g,' ');if(!name)continue;let sub=subjectMap.get(norm(name));if(!sub){if(c.classSubjects(cls.id).length>=10)break;sub={id:id('sub'),classId:cls.id,name,active:true,createdAt:nowIso()};db.subjects.push(sub);subjectMap.set(norm(name),sub);subjectsCreated++;}else subjectsMatched++;orderedSubjects.push(sub);}
+    if(!orderedSubjects.length)return{status:400,body:{error:'No valid subjects were detected'}};
+    const current=c.classPupils(cls.id),pupilMap=new Map();for(const p of current){const direct=norm(`${p.firstName||''}${p.surname||''}`)||norm(p.name),reverse=norm(`${p.surname||''}${p.firstName||''}`);if(direct)pupilMap.set(direct,p);if(reverse)pupilMap.set(reverse,p);}
+    let created=0,matched=0,marksSaved=0,skipped=0;
+    for(const row of rows){const firstName=String(row?.firstName||'').trim(),surname=String(row?.surname||'').trim(),sex=String(row?.sex||'').trim().toUpperCase().slice(0,1);if(!firstName||!surname||!['F','M'].includes(sex)){skipped++;continue;}const key=norm(firstName+surname);let pupil=pupilMap.get(key);if(!pupil){if(c.classPupils(cls.id).length>=120)break;pupil={id:id('p'),classId:cls.id,firstName,surname,name:`${firstName} ${surname}`.replace(/\s+/g,' ').trim(),sex,examNo:'',parentPhone:'',classTeacherComment:'',comments:{},active:true,createdAt:nowIso()};db.pupils.push(pupil);created++;}else{matched++;pupil.firstName=firstName;pupil.surname=surname;pupil.name=`${firstName} ${surname}`.replace(/\s+/g,' ').trim();pupil.sex=sex;}pupilMap.set(norm(firstName+surname),pupil);pupilMap.set(norm(surname+firstName),pupil);
+      const marks=Array.isArray(row?.marks)?row.marks:[];for(let i=0;i<orderedSubjects.length&&i<marks.length;i++){const raw=marks[i];if(raw===null||raw===undefined||raw==='')continue;const mark=cleanMark(raw);if(mark===null)continue;db.marks[c.markKey(assessment.id,pupil.id,orderedSubjects[i].id)]=mark;marksSaved++;}
+    }
+    return{status:200,body:{subjectsCreated,subjectsMatched,created,matched,marksSaved,skipped,state:stateForUser(db,user,workspaceKey)}};
+  }
 
   if(req.method==='POST'&&pathname==='/api/screenshot-import'){
     const b=await readJson(req),cls=c.userClass(user.id),assessment=c.userAssessment(user.id);if(!cls||!assessment)return{status:404,body:{error:'Class or assessment not found'}};
