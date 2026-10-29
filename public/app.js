@@ -1,5 +1,5 @@
 (() => {
-  const APP_VERSION='3.1.14';
+  const APP_VERSION='3.1.15';
   const app=document.getElementById('app');
   const state={me:null,page:'home',saveTimer:null,recoveryTimer:null,mirrorTimer:null,recoveryBusy:false,mirrorBusy:false};
   const esc=s=>String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
@@ -155,8 +155,7 @@
     setInterval(()=>captureDeviceRecovery('Automatic periodic recovery'),15*60*1000);
   }
   async function bootstrap(){
-    const activated=await activationStatus();
-    if(!activated){renderActivationGate();return;}
+    // Paid release: activation-code gate removed. Open EduSend directly.
     await bootstrapUnlocked();
   }
   function setupComplete(){return (state.me?.subjects?.length||0)>0&&(state.me?.pupils?.length||0)>0;}
@@ -444,6 +443,86 @@
   function ocrSexLoose(v){const x=String(v||'').replace(/[^A-Za-z]/g,'').toUpperCase();if(x==='M'||x==='MM')return'M';if(x==='F'||x==='FF')return'F';return'';}
   function editDistance(a,b){a=String(a||'');b=String(b||'');const d=Array(b.length+1).fill(0).map((_,j)=>j);for(let i=1;i<=a.length;i++){let prev=d[0];d[0]=i;for(let j=1;j<=b.length;j++){const old=d[j];d[j]=Math.min(d[j]+1,d[j-1]+1,prev+(a[i-1]===b[j-1]?0:1));prev=old;}}return d[b.length];}
   function fuzzySubjectCode(raw){const code=normOcr(raw);if(SUBJECT_CODE_MAP[code])return code;const candidates=Object.keys(SUBJECT_CODE_MAP).filter(x=>x.length>=2&&x.length<=5);let best='',dist=9;for(const c of candidates){if(Math.abs(c.length-code.length)>1)continue;const d=editDistance(code,c);if(d<dist){dist=d;best=c;}}return dist<=1?best:'';}
+  function fallbackTableStructureFromWords(words,canvasWidth,canvasHeight){
+    const W=(Array.isArray(words)?words:[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.box.x1>w.box.x0&&w.box.y1>w.box.y0&&w.conf>=5);
+    if(!W.length)return null;
+    const wdt=Number(canvasWidth)||Math.max(...W.map(w=>w.box.x1)),hgt=Number(canvasHeight)||Math.max(...W.map(w=>w.box.y1));
+    let serials=W.filter(w=>w.box.cx<wdt*.24&&w.box.cy>hgt*.08&&w.box.cy<hgt*.86&&/^\s*\d{1,3}[.)]?\s*$/.test(w.text)).map(w=>({y:w.box.cy,x:w.box.cx,n:Number(String(w.text).replace(/\D/g,'')),conf:w.conf})).filter(x=>x.n>=1&&x.n<=200).sort((a,b)=>a.y-b.y||b.conf-a.conf);
+    const yd=[];for(const a of serials){if(!yd.length||Math.abs(a.y-yd[yd.length-1].y)>8)yd.push(a);else if(a.conf>yd[yd.length-1].conf)yd[yd.length-1]=a;}serials=yd;
+    if(serials.length<3)return null;
+    const gapEst=[];
+    for(let i=1;i<serials.length;i++){const dn=serials[i].n-serials[i-1].n,dy=serials[i].y-serials[i-1].y;if(dn>0&&dn<=5){const g=dy/dn;if(g>10&&g<170)gapEst.push(g);}}
+    const rowGap=median(gapEst.length?gapEst:serials.slice(1).map((a,i)=>a.y-serials[i].y).filter(x=>x>10&&x<170));
+    if(!rowGap)return null;
+    let anchors=serials.slice();
+    const snX=median(serials.map(a=>a.x));
+    // Find the M/F column from repeated one-letter cells near the left half of the table.
+    const sexHits=[];
+    for(let i=0;i<anchors.length;i++){
+      const y=anchors[i].y,top=i?(anchors[i-1].y+y)/2:y-rowGap*.48,bottom=i<anchors.length-1?(y+anchors[i+1].y)/2:y+rowGap*.48;
+      const sx=W.filter(w=>w.box.cy>=top&&w.box.cy<bottom&&w.box.cx>wdt*.28&&w.box.cx<wdt*.52&&!!ocrSexLoose(w.text)).sort((a,b)=>b.conf-a.conf)[0];
+      if(sx)sexHits.push(sx.box.cx);
+    }
+    let sexX=median(sexHits);
+    // Collect printed alphabetic tokens before the sex/marks area and cluster them into surname/firstname columns.
+    const nameXs=[];
+    const nameWords=[];
+    for(let i=0;i<anchors.length;i++){
+      const y=anchors[i].y,top=i?(anchors[i-1].y+y)/2:y-rowGap*.48,bottom=i<anchors.length-1?(y+anchors[i+1].y)/2:y+rowGap*.48;
+      for(const w of W){
+        if(w.box.cy<top||w.box.cy>=bottom||w.box.cx<=snX+8||w.box.cx>=wdt*.47)continue;
+        const name=cleanPrintedToken(w.text);if(!name||ocrSexLoose(w.text))continue;
+        nameXs.push(w.box.cx);nameWords.push({x:w.box.cx,name,w});
+      }
+    }
+    if(nameXs.length<Math.min(5,anchors.length))return null;
+    let sorted=nameXs.slice().sort((a,b)=>a-b),c1=sorted[Math.floor(sorted.length*.22)]||sorted[0],c2=sorted[Math.floor(sorted.length*.78)]||sorted[sorted.length-1];
+    for(let k=0;k<10;k++){
+      const a=[],b=[];for(const x of nameXs)((Math.abs(x-c1)<=Math.abs(x-c2))?a:b).push(x);
+      if(a.length)c1=a.reduce((q,x)=>q+x,0)/a.length;if(b.length)c2=b.reduce((q,x)=>q+x,0)/b.length;
+    }
+    let surnameX=Math.min(c1,c2),firstX=Math.max(c1,c2);
+    if(firstX-surnameX<wdt*.045)return null;
+    if(!sexX)sexX=Math.min(wdt*.50,firstX+(firstX-surnameX)*.62);
+    const surnameLeft=(snX+surnameX)/2,surnameRight=(surnameX+firstX)/2,firstLeft=surnameRight,firstRight=(firstX+sexX)/2,sexLeft=firstRight;
+    // Reconstruct serial rows that OCR missed by using the regular row spacing and the two printed-name columns.
+    const intercept=median(serials.map(a=>a.y-(a.n-1)*rowGap)),maxObserved=Math.max(...serials.map(a=>a.n));
+    const expanded=[];let misses=0;
+    for(let n=1;n<=Math.min(200,maxObserved+60);n++){
+      const predicted=intercept+(n-1)*rowGap;if(predicted<hgt*.10)continue;if(predicted>hgt*.88)break;
+      const actual=serials.find(a=>a.n===n&&Math.abs(a.y-predicted)<rowGap*.55),y=actual?.y??predicted,top=y-rowGap*.43,bottom=y+rowGap*.43;
+      const inRow=W.filter(w=>w.box.cy>=top&&w.box.cy<bottom);
+      const hasSurname=inRow.some(w=>w.box.cx>=surnameLeft&&w.box.cx<surnameRight&&!!cleanPrintedToken(w.text));
+      const hasFirst=inRow.some(w=>w.box.cx>=firstLeft&&w.box.cx<firstRight&&!!cleanPrintedToken(w.text));
+      if(actual||(hasSurname&&hasFirst)){expanded.push({y,n,x:actual?.x??snX,conf:actual?.conf??50});misses=0;}
+      else{misses++;if(n>maxObserved&&expanded.length>=3&&misses>=3)break;}
+    }
+    if(expanded.length>=3)anchors=expanded;
+    let subjectCandidates=[];
+    const headerTop=Math.max(0,anchors[0].y-rowGap*1.65),headerBottom=anchors[0].y-rowGap*.18;
+    for(const w of W){
+      if(w.box.cy<headerTop||w.box.cy>headerBottom||w.box.cx<=sexX)continue;
+      const code=fuzzySubjectCode(w.text);if(!code||SUBJECT_SKIP_CODES.has(code)||!SUBJECT_CODE_MAP[code])continue;
+      if(!subjectCandidates.some(x=>x.code===code))subjectCandidates.push({code,name:SUBJECT_CODE_MAP[code],x:w.box.cx,box:w.box});
+    }
+    subjectCandidates.sort((a,b)=>a.x-b.x);
+    // If header OCR is weak, retain subjects already configured and infer equally spaced columns.
+    if(subjectCandidates.length<2&&Array.isArray(state.me?.subjects)&&state.me.subjects.length){
+      const existing=state.me.subjects.slice(0,10),start=Math.max(sexX+wdt*.035,wdt*.47),end=wdt*.93,step=(end-start)/Math.max(1,existing.length-1);
+      subjectCandidates=existing.map((sub,i)=>({code:'',name:sub.name,x:start+i*step,box:{cx:start+i*step}}));
+    }
+    const subjects=[];for(const h of subjectCandidates){if(subjects.length>=10)break;if(!subjects.some(s=>s.name.toLowerCase()===h.name.toLowerCase()))subjects.push(h);}
+    const firstSubjectX=subjects[0]?.x||Math.min(wdt*.55,sexX+wdt*.06),sexRight=(sexX+firstSubjectX)/2;
+    const rows=[];
+    const choose=(inRow,lo,hi,target)=>inRow.filter(w=>w.box.cx>=lo&&w.box.cx<hi&&w.conf>=10).map(w=>({name:cleanPrintedToken(w.text),w})).filter(x=>x.name).sort((a,b)=>b.w.conf-a.w.conf||Math.abs(a.w.box.cx-target)-Math.abs(b.w.box.cx-target))[0]?.name||'';
+    for(let i=0;i<anchors.length;i++){
+      const y=anchors[i].y,top=i?(anchors[i-1].y+y)/2:y-rowGap*.48,bottom=i<anchors.length-1?(y+anchors[i+1].y)/2:y+rowGap*.48,inRow=W.filter(w=>w.box.cy>=top&&w.box.cy<bottom);
+      const surname=choose(inRow,surnameLeft,surnameRight,surnameX),firstName=choose(inRow,firstLeft,firstRight,firstX);
+      let sex='';for(const w of inRow.filter(w=>w.box.cx>=sexLeft&&w.box.cx<sexRight).sort((a,b)=>Math.abs(a.box.cx-sexX)-Math.abs(b.box.cx-sexX)||b.conf-a.conf)){sex=ocrSexLoose(w.text);if(sex)break;}
+      rows.push({serial:anchors[i].n||i+1,surname,firstName,sex,marks:Array(subjects.length).fill(null),top,bottom,y,needsReview:!(surname&&firstName&&sex)});
+    }
+    return{subjects,rows,headerY:headerBottom,headH:rowGap*.7,surnameLeft,surnameRight,firstLeft,firstRight,sexLeft,sexRight,surnameX,firstX,sexX,width:wdt,words:W,fallback:true};
+  }
   function tableStructureFromWords(words){
     const W=(Array.isArray(words)?words:[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.box.x1>w.box.x0&&w.box.y1>w.box.y0&&w.conf>=8);
     if(!W.length)return null;
@@ -507,7 +586,22 @@
         else{const n=cands.map(w=>({name:cleanPrintedToken(w.text),w})).filter(x=>x.name).sort((a,b)=>b.w.conf-a.w.conf)[0]?.name;if(n)row[key]=n;}
       }
     }
-    table.rows=table.rows.filter(r=>r.surname&&r.firstName&&r.sex);
+    table.rows=table.rows.filter(r=>r.surname||r.firstName||r.sex);
+    for(const r of table.rows)r.needsReview=!(r.surname&&r.firstName&&r.sex);
+    return table;
+  }
+  async function refineSubjectHeaders(table,canvas,worker,onStatus){
+    if(!table?.rows?.length||table.subjects?.length>=2)return table;
+    const gaps=table.rows.slice(1).map((r,i)=>r.y-table.rows[i].y).filter(x=>x>10),rowGap=median(gaps)||Math.max(26,(table.rows[0].bottom-table.rows[0].top));
+    const y1=Math.max(1,table.rows[0].top+rowGap*.06),y0=Math.max(0,y1-rowGap*1.45),x0=Math.max(0,(table.sexX||canvas.width*.40)+canvas.width*.018),x1=Math.min(canvas.width,canvas.width*.97);
+    const cr=cropCanvasRegion(canvas,x0,y0,x1,y1,2.2);
+    try{await worker.setParameters({tessedit_pageseg_mode:'11',preserve_interword_spaces:'1',tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ'});}catch{}
+    onStatus&&onStatus('Reading subject headings…',.72);
+    const res=await worker.recognize(cr.canvas),words=(res?.data?.words||[]).map(w=>({text:ocrWordText(w),box:ocrBox(w),conf:Number(w?.confidence??w?.conf??100)})).filter(w=>w.text&&w.conf>=5);
+    const found=[];
+    for(const w of words){const code=fuzzySubjectCode(w.text);if(!code||SUBJECT_SKIP_CODES.has(code)||!SUBJECT_CODE_MAP[code])continue;const srcX=x0+w.box.cx/cr.scale;if(!found.some(x=>x.code===code))found.push({code,name:SUBJECT_CODE_MAP[code],x:srcX,box:{cx:srcX}});}
+    found.sort((a,b)=>a.x-b.x);
+    if(found.length){table.subjects=[];for(const h of found){if(table.subjects.length>=10)break;if(!table.subjects.some(s=>s.name.toLowerCase()===h.name.toLowerCase()))table.subjects.push(h);}const first=table.subjects[0]?.x;if(first)table.sexRight=((table.sexX||x0)+first)/2;}
     return table;
   }
   function attachMarksByCoordinates(table,words){
@@ -530,16 +624,26 @@
   async function imageToStructuredClass(file,onStatus){
     const source=await imageSourceForOcr(file),canvas=await sourceToCanvas(source),worker=await ensureOcrWorker(p=>onStatus&&onStatus(`Reading table structure ${file.name}…`,p*.48));
     try{await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'6'});}catch{}
-    const base=await worker.recognize(canvas),table=tableStructureFromWords(base?.data?.words||[]);
-    if(!table)throw new Error(`${file.name}: EduSend could not confidently locate the SURNAME, FIRSTNAME and SEX table columns. Try a straighter, closer photo of the mark table.`);
+    // Sparse text is better for photographed tables; fall back to block OCR and geometry if headings are missed.
+    try{await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'11'});}catch{}
+    const sparse=await worker.recognize(canvas);let allWords=[...(sparse?.data?.words||[])];
+    let table=tableStructureFromWords(allWords);
+    if(!table){
+      try{await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'6'});}catch{}
+      const block=await worker.recognize(canvas);allWords=allWords.concat(block?.data?.words||[]);
+      table=tableStructureFromWords(allWords)||fallbackTableStructureFromWords(allWords,canvas.width,canvas.height);
+    }
+    if(!table)throw new Error(`${file.name}: EduSend could not locate enough numbered table rows. Try a closer photo that includes the full mark table.`);
+    await refineSubjectHeaders(table,canvas,worker,onStatus);
     await refineIdentityColumns(table,canvas,worker,onStatus);
-    if(!table.rows.length)throw new Error(`${file.name}: no pupil rows with a clear surname, first name and M/F sex were found. Try a clearer photo focused on the table.`);
+    // Do not throw away the whole sheet because a few rows are uncertain. Keep valid rows and flag uncertain rows for review.
+    if(!table.rows.length)throw new Error(`${file.name}: no pupil rows could be reconstructed. Try a closer photo focused on the mark table.`);
     if(table.subjects.length){
       let digitWords=[];try{await worker.setParameters({tessedit_char_whitelist:'0123456789-',tessedit_pageseg_mode:'6'});const digits=await worker.recognize(canvas);digitWords=digits?.data?.words||[];}catch{}
-      attachMarksByCoordinates(table,digitWords.length?digitWords:(base?.data?.words||[]));
+      attachMarksByCoordinates(table,digitWords.length?digitWords:allWords);
       await refineMarksByColumns(table,canvas,worker,onStatus);
     }
-    return{subjects:table.subjects.map(s=>({code:s.code,name:s.name})),rows:table.rows.map(r=>({firstName:r.firstName,surname:r.surname,sex:r.sex,marks:r.marks}))};
+    return{subjects:table.subjects.map(s=>({code:s.code,name:s.name})),rows:table.rows.map(r=>({firstName:r.firstName,surname:r.surname,sex:r.sex,marks:r.marks,needsReview:!!r.needsReview,serial:r.serial}))};
   }
   function detectStructuredTextTable(text){
     const lines=String(text||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean);let hi=-1,headers=[];
@@ -589,7 +693,7 @@
       if(!detectedSubjects.length&&!rows.length){review.innerHTML='';return;}
       review.innerHTML=`<div class="ocr-review-head"><div><b>${detectedSubjects.length} subjects • ${rows.length} pupils detected</b><span>Correct anything that is unclear, then confirm the whole class import.</span></div></div>
         <div class="class-import-subjects"><h3>Detected Subjects</h3><div class="detected-subject-grid">${detectedSubjects.map((s,i)=>`<label><small>${esc(s.code||`Subject ${i+1}`)}</small><input data-subject-name="${i}" value="${esc(s.name)}"></label>`).join('')}</div></div>
-        <div class="ocr-table-wrap"><table class="ocr-table"><thead><tr><th>First name</th><th>Surname</th><th>Sex</th>${detectedSubjects.map(s=>`<th>${esc(s.name)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map((r,i)=>`<tr data-class-row="${i}"><td><input data-field="firstName" value="${esc(r.firstName)}"></td><td><input data-field="surname" value="${esc(r.surname)}"></td><td><select data-field="sex"><option value="">Choose</option><option value="F" ${r.sex==='F'?'selected':''}>Female</option><option value="M" ${r.sex==='M'?'selected':''}>Male</option></select></td>${detectedSubjects.map((s,j)=>`<td><input class="ocr-mark" data-mark="${j}" value="${r.marks?.[j]==='ABSENT'?'ABS':(r.marks?.[j]??'')}" inputmode="decimal" placeholder="—"></td>`).join('')}<td><button type="button" class="icon-btn danger-icon" data-remove-class-row="${i}">×</button></td></tr>`).join('')}</tbody></table></div>
+        <div class="ocr-table-wrap"><table class="ocr-table"><thead><tr><th>No.</th><th>First name</th><th>Surname</th><th>Sex</th>${detectedSubjects.map(s=>`<th>${esc(s.name)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map((r,i)=>`<tr data-class-row="${i}" class="${r.needsReview?'ocr-row-error':''}"><td><b>${esc(r.serial||i+1)}</b>${r.needsReview?'<small class="review-needed">Check</small>':''}</td><td><input data-field="firstName" value="${esc(r.firstName)}" placeholder="First name"></td><td><input data-field="surname" value="${esc(r.surname)}" placeholder="Surname"></td><td><select data-field="sex"><option value="">Choose</option><option value="F" ${r.sex==='F'?'selected':''}>Female</option><option value="M" ${r.sex==='M'?'selected':''}>Male</option></select></td>${detectedSubjects.map((s,j)=>`<td><input class="ocr-mark" data-mark="${j}" value="${r.marks?.[j]==='ABSENT'?'ABS':(r.marks?.[j]??'')}" inputmode="decimal" placeholder="—"></td>`).join('')}<td><button type="button" class="icon-btn danger-icon" data-remove-class-row="${i}">×</button></td></tr>`).join('')}</tbody></table></div>
         <div class="screenshot-import-actions"><button id="confirmClassImport" class="btn primary big" type="button">Confirm Class Import</button><button id="chooseClassFileAgain" class="btn ghost" type="button">Choose another file</button></div>
         <p class="helper">Existing subjects and pupils are matched where possible. New ones are added. Existing pupil names/sex can be corrected from the reviewed document. Blank mark cells do not overwrite an existing mark.</p>`;
       review.querySelectorAll('[data-remove-class-row]').forEach(b=>b.onclick=()=>{rows.splice(Number(b.dataset.removeClassRow),1);render();});

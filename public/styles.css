@@ -79,3 +79,5 @@
 .activation-button{margin-top:16px;min-height:52px;font-size:17px}
 .activation-error{min-height:22px;margin-top:8px;color:#b42318;font-weight:700}
 .activation-card small{display:block;margin-top:14px;color:#667085;line-height:1.45}
+
+.review-needed{display:block;font-size:10px;font-weight:800;color:#b45309;margin-top:3px}.ocr-row-error{background:#fff7ed!important}.ocr-row-error input,.ocr-row-error select{border-color:#f59e0b!important}
