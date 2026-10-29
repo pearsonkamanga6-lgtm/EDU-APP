@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const APP_VERSION = '3.1.14';
+const APP_VERSION = '3.1.16';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = process.env.EDUSEND_DATA_DIR || path.join(ROOT, 'data');
@@ -356,14 +356,8 @@ async function api(req,res,urlObj){
   if(req.method==='GET'&&pathname==='/api/version')return sendJson(res,200,{version:APP_VERSION,storage:storageMode});
   if(req.method==='GET'&&pathname==='/api/health')return sendJson(res,200,{ok:true,version:APP_VERSION,storage:storageMode});
   const workspaceKey=workspaceKeyFor(req,res);
-  if(req.method==='GET'&&pathname==='/api/activation/status')return sendJson(res,200,{activated:isActivated(req,workspaceKey),version:APP_VERSION});
-  if(req.method==='POST'&&pathname==='/api/activate'){
-    const b=await readJson(req);
-    if(!activationCodeMatches(b?.code))return sendJson(res,401,{error:'Invalid EduSend activation code'});
-    setActivationCookie(req,res,workspaceKey);
-    return sendJson(res,200,{activated:true,validForDays:365,version:APP_VERSION});
-  }
-  if(!isActivated(req,workspaceKey))return sendJson(res,403,{error:'EduSend is locked. Enter a valid activation code to continue.',code:'ACTIVATION_REQUIRED'});
+  if(req.method==='GET'&&pathname==='/api/activation/status')return sendJson(res,200,{activated:true,version:APP_VERSION});
+  if(req.method==='POST'&&pathname==='/api/activate')return sendJson(res,200,{activated:true,version:APP_VERSION,message:'Activation codes are disabled in this paid release.'});
   if(req.method==='POST'&&pathname==='/api/ai-comment'){
     const b=await readJson(req);
     const snap=await readWorkspace(workspaceKey,db=>{const c=ctx(db),user=c.standaloneUser(),cls=c.userClass(user.id),pupil=cls&&db.pupils.find(p=>p.id===String(b.pupilId||'')&&p.classId===cls.id&&p.active!==false);if(!pupil)throw Object.assign(new Error('Pupil not found'),{status:404});return pupilReportSnapshot(db,user,pupil);});
@@ -380,4 +374,4 @@ function serveStatic(pathname,res){let rel=decodeURIComponent(pathname||'/');if(
 
 const server=http.createServer(async(req,res)=>{const urlObj=new URL(req.url,`http://${req.headers.host||'localhost'}`);try{if(urlObj.pathname.startsWith('/api/')){await api(req,res,urlObj);return;}if(!serveStatic(urlObj.pathname,res))sendError(res,404,'Not found');}catch(err){console.error(err);if(!res.headersSent)sendError(res,err.status||500,err.message||'Server error');else res.end();}});
 
-initStorage().then(()=>server.listen(PORT,HOST,()=>{console.log(`EduSend V${APP_VERSION} running on http://${HOST}:${PORT}`);console.log(`Storage: ${storageMode} (separate browser workspaces; no DATABASE_URL required)`);console.log(`Online AI comments: ${OPENAI_API_KEY?'configured':'not configured (Smart Local fallback active)'}`);console.log('Account sign-in: disabled; EduSend activation code is required once per browser/device.');})).catch(err=>{console.error('Could not initialise storage:',err);process.exit(1);});
+initStorage().then(()=>server.listen(PORT,HOST,()=>{console.log(`EduSend V${APP_VERSION} running on http://${HOST}:${PORT}`);console.log(`Storage: ${storageMode} (separate browser workspaces; no DATABASE_URL required)`);console.log(`Online AI comments: ${OPENAI_API_KEY?'configured':'not configured (Smart Local fallback active)'}`);console.log('Account sign-in: disabled; activation-code gate removed for paid release.');})).catch(err=>{console.error('Could not initialise storage:',err);process.exit(1);});
